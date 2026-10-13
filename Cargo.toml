@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/launcher-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["uXa"]
+description = "uXa guild game launcher"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

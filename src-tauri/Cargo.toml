@@ -1,0 +1,29 @@
+[package]
+name = "uxa-launcher"
+version.workspace = true
+description = "uXa guild game launcher"
+authors.workspace = true
+edition = "2021"
+
+[lib]
+name = "uxa_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dirs = "6"
+launcher-core = { path = "../crates/launcher-core" }
+open = "5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = "3"

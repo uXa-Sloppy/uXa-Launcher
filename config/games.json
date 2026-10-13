@@ -1,0 +1,43 @@
+{
+  "newsUrl": "",
+  "launcher": {
+    "version": "0.1.0",
+    "displayVersion": "v0.1",
+    "updateOwner": "",
+    "updateRepo": ""
+  },
+  "games": [
+    {
+      "id": "friday-night-fights",
+      "name": "Friday Night Fights",
+      "kind": "unreal-client",
+      "thumbnail": "/art/fnf-thumb.jpg",
+      "hero": "/art/fnf-hero.jpg",
+      "installDirName": "FridayNightFights",
+      "executable": "FridayNightFights.exe",
+      "serversConfig": "Config/Servers.ini",
+      "serversKey": "friday-night-fights",
+      "preserve": ["Saved/SaveGames", "Saved/Config"],
+      "source": {
+        "type": "github-release",
+        "owner": "uXa-Sloppy",
+        "repo": "FridayNightFights",
+        "assetContains": ["Client", "Win64"],
+        "assetPattern": "",
+        "includePrereleases": true
+      }
+    },
+    {
+      "id": "grave-march",
+      "name": "Grave March",
+      "kind": "web",
+      "thumbnail": "/art/grave-thumb.jpg",
+      "hero": "/art/grave-thumb.jpg",
+      "source": {
+        "type": "web",
+        "url": "https://www.undeadlegion.pro/grave-march-unity/",
+        "versionPattern": "Build\\s+(\\d+)\\s*,\\s*last updated\\s+([^<\\r\\n]+)"
+      }
+    }
+  ]
+}

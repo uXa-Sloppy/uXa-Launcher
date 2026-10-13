@@ -1,0 +1,18 @@
+{
+  "friday-night-fights": [
+    {
+      "id": "dolmar",
+      "name": "Dolmar's Server",
+      "host": "71.71.45.128",
+      "port": 7777,
+      "default": true
+    },
+    {
+      "id": "localhost",
+      "name": "Localhost",
+      "host": "127.0.0.1",
+      "port": 7777,
+      "default": false
+    }
+  ]
+}

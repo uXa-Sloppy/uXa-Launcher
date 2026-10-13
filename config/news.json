@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "id": "ironfist-2v2",
+      "guild": "Ironfist Guild",
+      "ago": "2h ago",
+      "body": "We're hosting a 2v2 tournament this weekend!"
+    },
+    {
+      "id": "ravenwatch-hall",
+      "guild": "Ravenwatch Guild",
+      "ago": "1d ago",
+      "body": "New guild hall upgrades unlocked."
+    }
+  ]
+}
