@@ -1,0 +1,23 @@
+{
+  "installDir": "C:\\uXa\\FridayNightFightsServer",
+  "executable": "FridayNightFightsServer.exe",
+  "port": 7777,
+  "args": ["-log"],
+  "preserve": ["Saved", "Config"],
+  "owner": "uXa-Sloppy",
+  "repo": "FridayNightFights",
+  "assetContains": ["Server", "Win64"],
+  "assetPattern": "",
+  "includePrereleases": true,
+  "apiBase": "https://api.github.com",
+  "listen": "0.0.0.0:8787",
+  "warnSeconds": 15,
+  "healthWaitSecs": 8,
+  "quitWaitSecs": 20,
+  "requireTcp": false,
+  "tlsCert": "",
+  "tlsKey": "",
+  "backupDir": "",
+  "workDir": "",
+  "logDir": ""
+}

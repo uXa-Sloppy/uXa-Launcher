@@ -32,7 +32,7 @@ pub struct LauncherInfo {
 }
 
 fn default_display() -> String {
-    "v0.1".to_string()
+    "v0.2".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +87,9 @@ pub struct ServerEntry {
     pub port: u16,
     #[serde(default)]
     pub default: bool,
+    /// Base URL of the uXa Server Agent. Empty when this host is not managed from the launcher.
+    #[serde(default)]
+    pub agent_url: String,
 }
 
 pub type ServerMap = HashMap<String, Vec<ServerEntry>>;
@@ -237,11 +240,13 @@ mod tests {
     fn bundled_catalog_parses() {
         let catalog = load_catalog(include_str!("../../../config/games.json")).unwrap();
         assert_eq!(catalog.games.len(), 2);
-        assert_eq!(catalog.launcher.version, "0.1.0");
+        assert_eq!(catalog.launcher.version, "0.2.0");
         let servers = load_servers(include_str!("../../../config/servers.json")).unwrap();
         let list = servers.get("friday-night-fights").unwrap();
         assert_eq!(list[0].host, "71.71.45.128");
         assert_eq!(list[0].port, 7777);
+        assert_eq!(list[0].agent_url, "https://71.71.45.128:8787");
+        assert!(list[1].agent_url.is_empty());
         let news = load_news(include_str!("../../../config/news.json")).unwrap();
         assert_eq!(news.len(), 2);
     }

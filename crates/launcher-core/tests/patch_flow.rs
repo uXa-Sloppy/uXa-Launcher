@@ -236,6 +236,7 @@ fn servers_ini_matches_the_game_format() {
             host: "71.71.45.128".into(),
             port: 7777,
             default: true,
+            agent_url: String::new(),
         },
         ServerEntry {
             id: "localhost".into(),
@@ -243,6 +244,7 @@ fn servers_ini_matches_the_game_format() {
             host: "127.0.0.1".into(),
             port: 7777,
             default: false,
+            agent_url: String::new(),
         },
     ];
     assert_eq!(

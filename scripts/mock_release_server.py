@@ -43,6 +43,28 @@ echo "Friday Night Fights mock client connected to $1"
     return buf.getvalue()
 
 
+def build_server_zip(tag: str) -> bytes:
+    script = """#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+mkdir -p "$dir/Saved"
+printf '%s\\n' '{"playerCount":1}' > "$dir/Saved/uxa-status.json"
+printf '%s\\n' "server """ + tag + """" > "$dir/ready.txt"
+while IFS= read -r line; do
+  printf '%s\\n' "$line" >> "$dir/stdin.log"
+  case "$line" in
+    quit*) exit 0 ;;
+  esac
+done
+"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        info = zipfile.ZipInfo("FridayNightFightsServer.exe")
+        info.external_attr = 0o755 << 16
+        archive.writestr(info, script)
+        archive.writestr("Engine/README.txt", f"mock dedicated server {tag}\n")
+    return buf.getvalue()
+
+
 def load_tag(path: Path) -> str:
     if path.is_file():
         text = path.read_text(encoding="utf-8").strip()
@@ -64,6 +86,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/releases") or "/releases" in path:
             self._releases()
             return
+        if path.endswith("/server"):
+            self._file(build_server_zip(load_tag(self.version_file)))
+            return
         if path.endswith(".zip") or path.endswith("/asset"):
             self._asset()
             return
@@ -72,6 +97,7 @@ class Handler(BaseHTTPRequestHandler):
     def _releases(self) -> None:
         tag = load_tag(self.version_file)
         payload = build_zip(tag)
+        server_payload = build_server_zip(tag)
         host = self.headers.get("Host", "127.0.0.1")
         body = json.dumps(
             [
@@ -104,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
                             "name": "FridayNightFights_Server_Win64.zip",
                             "url": f"http://{host}/server",
                             "browser_download_url": f"http://{host}/server",
-                            "size": 1,
+                            "size": len(server_payload),
                         },
                     ],
                 }
@@ -115,6 +141,20 @@ class Handler(BaseHTTPRequestHandler):
     def _asset(self) -> None:
         tag = load_tag(self.version_file)
         payload = build_zip(tag)
+        start = 0
+        status = 200
+        range_header = self.headers.get("Range")
+        if range_header and range_header.startswith("bytes="):
+            start_text = range_header.removeprefix("bytes=").split("-", 1)[0]
+            start = int(start_text or "0")
+            if start > len(payload):
+                self._send(416, b"", "application/octet-stream")
+                return
+            payload = payload[start:]
+            status = 206
+        self._send(status, payload, "application/octet-stream")
+
+    def _file(self, payload: bytes) -> None:
         start = 0
         status = 200
         range_header = self.headers.get("Range")

@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AgentAction,
+  AgentLogLine,
+  AgentRelease,
+  AgentStatus,
   Bootstrap,
   GameStatus,
   LauncherUpdate,
@@ -28,6 +32,14 @@ export interface LauncherApi {
   openLogs(): Promise<void>;
   openUrl(url: string): Promise<void>;
   refreshNews(): Promise<NewsItem[]>;
+  unlockAdmin(secret: string, serverId: string, remember: boolean): Promise<AgentStatus>;
+  adminProbe(serverId: string): Promise<AgentStatus>;
+  forgetAdmin(): Promise<void>;
+  adminReleases(serverId: string): Promise<AgentRelease[]>;
+  adminLogs(serverId: string, after: number): Promise<AgentLogLine[]>;
+  adminDeploy(serverId: string, tag: string): Promise<AgentAction>;
+  adminRestart(serverId: string): Promise<AgentAction>;
+  adminStop(serverId: string): Promise<AgentAction>;
 }
 
 const tauriApi: LauncherApi = {
@@ -49,6 +61,15 @@ const tauriApi: LauncherApi = {
   openLogs: () => invoke("open_logs"),
   openUrl: (url) => invoke("open_url", { url }),
   refreshNews: () => invoke<NewsItem[]>("refresh_news"),
+  unlockAdmin: (secret, serverId, remember) =>
+    invoke<AgentStatus>("unlock_admin", { secret, serverId, remember }),
+  adminProbe: (serverId) => invoke<AgentStatus>("admin_probe", { serverId }),
+  forgetAdmin: () => invoke("forget_admin"),
+  adminReleases: (serverId) => invoke<AgentRelease[]>("admin_releases", { serverId }),
+  adminLogs: (serverId, after) => invoke<AgentLogLine[]>("admin_logs", { serverId, after }),
+  adminDeploy: (serverId, tag) => invoke<AgentAction>("admin_deploy", { serverId, tag }),
+  adminRestart: (serverId) => invoke<AgentAction>("admin_restart", { serverId }),
+  adminStop: (serverId) => invoke<AgentAction>("admin_stop", { serverId }),
 };
 
 const previewGames: Bootstrap["games"] = [
@@ -59,7 +80,7 @@ const previewGames: Bootstrap["games"] = [
     thumbnail: "/art/fnf-thumb.jpg",
     hero: "/art/fnf-hero.jpg",
     servers: [
-      { id: "dolmar", name: "Dolmar's Server", host: "71.71.45.128", port: 7777, default: true },
+      { id: "dolmar", name: "Dolmar's Server", host: "71.71.45.128", port: 7777, default: true, agentUrl: "https://71.71.45.128:8787" },
       { id: "localhost", name: "Localhost", host: "127.0.0.1", port: 7777 },
     ],
   },
@@ -73,6 +94,43 @@ const previewGames: Bootstrap["games"] = [
   },
 ];
 
+const previewAdmin: {
+  unlocked: boolean;
+  version: string;
+  online: boolean;
+  started: number;
+  playerCount: number | null;
+  phase: string;
+  logs: AgentLogLine[];
+} = {
+  unlocked: false,
+  version: "",
+  online: false,
+  started: 0,
+  playerCount: null,
+  phase: "idle",
+  logs: [],
+};
+
+function previewLog(message: string) {
+  previewAdmin.logs.push({
+    id: previewAdmin.logs.length + 1,
+    at: new Date().toISOString(),
+    message,
+  });
+}
+
+function previewStatus(): AgentStatus {
+  return {
+    version: previewAdmin.version,
+    online: previewAdmin.online,
+    uptimeSecs: previewAdmin.online ? Math.max(1, Math.floor((Date.now() - previewAdmin.started) / 1000)) : 0,
+    playerCount: previewAdmin.online ? previewAdmin.playerCount : null,
+    port: 7777,
+    phase: previewAdmin.phase,
+  };
+}
+
 const previewNotes = `## v0.9.5 – The Brawler's Update
 
 - New arena: The Rusty Cage
@@ -83,12 +141,13 @@ const previewNotes = `## v0.9.5 – The Brawler's Update
 
 function previewBootstrap(): Bootstrap {
   return {
-    launcherVersion: "0.1.0",
-    displayVersion: "v0.1",
+    launcherVersion: "0.2.0",
+    displayVersion: "v0.2",
     defaultInstallRoot: "%LOCALAPPDATA%\\uXa\\Games",
     dataDir: "%LOCALAPPDATA%\\uXa\\Launcher",
     logDir: "%LOCALAPPDATA%\\uXa\\Launcher\\logs",
     hasGithubToken: false,
+    hasAgentSecret: previewAdmin.unlocked,
     settings: {
       installRoot: "",
       installOverrides: {},
@@ -192,6 +251,60 @@ const previewApi: LauncherApi = {
   },
   async refreshNews() {
     return previewBootstrap().news;
+  },
+  async unlockAdmin(secret) {
+    if (secret.trim().length < 8) {
+      throw new Error("Admin key was rejected by the server agent.");
+    }
+    previewAdmin.unlocked = true;
+    previewLog("admin key accepted");
+    return previewStatus();
+  },
+  async adminProbe() {
+    if (!previewAdmin.unlocked) throw new Error("Enter the admin key in Settings.");
+    return previewStatus();
+  },
+  async forgetAdmin() {
+    previewAdmin.unlocked = false;
+    previewAdmin.online = false;
+    previewLog("admin key cleared");
+  },
+  async adminReleases() {
+    return [
+      { tag: "v1.2.0", name: "Good server", prerelease: false, assetName: "FridayNightFights-Server-Win64.zip" },
+      { tag: "v9.9.9-broken", name: "Broken server", prerelease: true, assetName: "FridayNightFights-Server-Win64.zip" },
+    ];
+  },
+  async adminLogs(_serverId, after) {
+    return previewAdmin.logs.filter((line) => line.id > after);
+  },
+  async adminDeploy(_serverId, tag) {
+    previewAdmin.phase = "deploying";
+    previewLog(`deploy started tag=${tag}`);
+    previewLog("backed up Saved");
+    previewLog("broadcast warning");
+    previewAdmin.version = tag || "v1.2.0";
+    previewAdmin.online = true;
+    previewAdmin.started = Date.now();
+    previewAdmin.playerCount = 2;
+    previewAdmin.phase = "running";
+    previewLog(`deploy finished version=${previewAdmin.version}`);
+    return { ok: true, message: `Deployed ${previewAdmin.version}.`, status: previewStatus() };
+  },
+  async adminRestart() {
+    previewLog("restart requested");
+    previewLog("broadcast warning");
+    previewAdmin.online = true;
+    previewAdmin.started = Date.now();
+    previewLog("restart finished");
+    return { ok: true, message: "Server restarted.", status: previewStatus() };
+  },
+  async adminStop() {
+    previewLog("stop requested");
+    previewAdmin.online = false;
+    previewAdmin.phase = "idle";
+    previewLog("stop finished");
+    return { ok: true, message: "Server stopped.", status: previewStatus() };
   },
 };
 

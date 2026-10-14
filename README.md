@@ -1,6 +1,6 @@
 # uXa Launcher
 
-Desktop launcher for the uXa gaming guild, version **0.1.0**. It installs and patches Windows games, keeps player saves across updates, and opens browser games. It is its own project: launcher versions are not game versions.
+Desktop launcher for the uXa gaming guild, version **0.2.0**. It installs and patches Windows games, keeps player saves across updates, and opens browser games. Admins can also deploy the Friday Night Fights dedicated server. Launcher versions are not game versions.
 
 ![Friday Night Fights ready to play](docs/screenshots/friday-night-fights.png)
 
@@ -21,8 +21,67 @@ Desktop launcher for the uXa gaming guild, version **0.1.0**. It installs and pa
 - **Settings** cover the games folder, a per-game install path, an optional GitHub token, update checks on startup, the news URL, and the launcher's own update repository. On Windows the token is stored in Credential Manager; otherwise it is a user-only file. It is never written into `settings.json`.
 - **Launcher updates** are a v0.1 stub: if an owner/repo is set, a newer GitHub release is announced. The launcher does not install that update itself.
 - **Logs** go to `%LOCALAPPDATA%\uXa\Launcher\logs` on Windows (`~/.local/share/uXa/Launcher/logs` on Linux).
+- **Admin** is hidden until an admin key is accepted by a server agent. From there an admin can deploy a dedicated-server build, restart it, or stop it. The key is never written into `settings.json`.
 
-Out of scope for 0.1: an intro video, accounts, and login. This repo does not modify Friday Night Fights.
+Out of scope: an intro video, accounts, and login. This repo does not modify Friday Night Fights.
+
+## Server admin
+
+The launcher does not copy files onto the game machine itself. A small **uXa Server Agent** runs on that machine (for Dolmar, `71.71.45.128`) and the launcher sends it signed requests.
+
+The agent listens on its own port (default `8787`) and does four things when asked to deploy:
+
+1. Download the zip whose name contains `Server` and `Win64` from the selected GitHub release of `uXa-Sloppy/FridayNightFights`.
+2. Warn the running `FridayNightFightsServer` on stdin (`say`, then `quit`), then copy `Saved` to a timestamped backup.
+3. Swap the new build into place and keep `Saved` and `Config`.
+4. Start it with the configured arguments and `-port=7777`, wait until the process is still running, and put the previous build back if it exits.
+
+Every request carries `X-Uxa-Timestamp` and `X-Uxa-Signature`, an HMAC-SHA256 of `{unix_seconds}\n{METHOD}\n{path}\n{sha256(body)}`. The timestamp must be within five minutes. Set `tlsCert` and `tlsKey` in `agent.json` to serve HTTPS with those same signatures. Without a certificate the listener is HTTP, which is what the local mock uses; put a real certificate on a machine that faces the network, or terminate TLS in front of it. The launcher trusts the system certificate store.
+
+There is no built-in admin key. The agent reads, in order, `UXA_AGENT_SECRET`, `UXA_AGENT_SECRET_FILE`, then `agent.secret` next to the executable or the config. A GitHub token, if the releases are private, is `UXA_GITHUB_TOKEN` only. If `agent.json` contains a secret or token field, the agent refuses to start. `config/agent.example.json` is the shape of that file.
+
+`config/servers.json` points Dolmar's Server at `https://71.71.45.128:8787`. That address is not a secret. `UXA_AGENT_URL` overrides every server's agent address for a local test.
+
+In the launcher, Settings has an admin key field. Unlock asks the agent for status. A 401 stays locked and shows no Admin section. Remembering the key stores it in Windows Credential Manager, or in a user-only `agent-secret` file otherwise. After it unlocks, Admin shows the server, the matching releases, Deploy & Restart, Restart only, Stop, a confirm step, and a live log with version, online, uptime, and player count. Player count is read from `Saved/uxa-status.json` when the server writes one; otherwise it stays unknown.
+
+### Install the agent on Windows
+
+On the game server, from an elevated PowerShell, after `cargo build -p uxa-server-agent --release` (or after downloading the `uxa-server-agent-windows` workflow artifact):
+
+```powershell
+$env:UXA_AGENT_SECRET = "paste-the-guild-key"
+powershell -ExecutionPolicy Bypass -File scripts\install-server-agent.ps1
+```
+
+Edit `C:\uXa\ServerAgent\agent.json` so `installDir` is the dedicated server folder, then `sc start uXaServerAgent`. The service name is `uXaServerAgent`. `agent.secret` is readable by SYSTEM and Administrators only. Foreground debugging, without the service, is `uxa-server-agent.exe` in that folder with the same variables.
+
+Generate a certificate the launcher will trust, set `tlsCert` and `tlsKey`, and restart the service before pointing the launcher at `https://`. The game port stays `7777`. The agent port stays separate.
+
+### Try a deploy against the mock
+
+The Rust test `deploy_preserves_saves_and_rolls_back` does this without the UI: a local GitHub stand-in serves a good server zip and a zip that exits immediately, and the agent must keep `Saved`, broadcast `say` then `quit`, and restore the good build.
+
+To click through it, serve the mock (it now includes a real `Server` + `Win64` zip), point an agent at it, and override the launcher:
+
+```bash
+python3 scripts/mock_release_server.py --port 8899
+UXA_AGENT_SECRET=dev-admin-key \
+UXA_AGENT_CONFIG=/tmp/uxa-agent.json \
+UXA_GITHUB_API_BASE=http://127.0.0.1:8899 \
+  cargo run -p uxa-server-agent
+```
+
+`/tmp/uxa-agent.json` needs `installDir`, `listen` (for example `127.0.0.1:8791`), `apiBase` set to the mock, `warnSeconds` of `0` if you do not want to wait, and no secret field. Then:
+
+```bash
+UXA_AGENT_URL=http://127.0.0.1:8791 \
+UXA_GITHUB_API_BASE=http://127.0.0.1:8899 \
+UXA_DATA_DIR=/tmp/uxa-demo \
+UXA_INSTALL_ROOT=/tmp/uxa-demo/Games \
+  npm run tauri dev
+```
+
+Unlock with `dev-admin-key`. Deploy & Restart. The agent log should show the download, the save backup, and a healthy process. Stop shuts it down. A build that exits during the health wait is rolled back; that path is what the automated test forces.
 
 ## Layout on disk
 
@@ -79,7 +138,7 @@ Pushing `main` also runs `.github/workflows/windows-build.yml`, which tests the 
 
 ## Tests
 
-`cargo test -p launcher-core` covers:
+`npm test` runs `cargo test -p launcher-core -p uxa-server-agent`. The launcher tests cover:
 
 - choosing the `Client` + `Win64` zip and ignoring server/Linux assets
 - semver comparison of release tags
@@ -90,6 +149,8 @@ Pushing `main` also runs `.github/workflows/windows-build.yml`, which tests the 
 - `Config/Servers.ini` format and `FridayNightFights.exe host:port`
 - Grave March's build line, including a dead page that still allows play
 - a private-repo 404 that leaves an installed game playable
+
+The server-agent test deploys a mock `Server` + `Win64` zip, keeps `Saved` and `Config`, records the warning and `quit`, rejects a bad signature, rolls back a build that exits immediately, then restarts and stops the restored process. A config file that contains a secret is refused.
 
 ## Config
 
@@ -102,4 +163,4 @@ Pushing `main` also runs `.github/workflows/windows-build.yml`, which tests the 
 "preserve": ["Saved/SaveGames", "Saved/Config"]
 ```
 
-`assetPattern` is an optional regex applied in addition to `assetContains`. Assets must be `.zip` files. `config/servers.json` is the server list.
+`assetPattern` is an optional regex applied in addition to `assetContains`. Assets must be `.zip` files. `config/servers.json` is the server list. An optional `agentUrl` is the uXa Server Agent for that host. The dedicated server build is chosen with `Server` and `Win64`, which is separate from the client filter above. `config/agent.example.json` is the agent config, without a key.

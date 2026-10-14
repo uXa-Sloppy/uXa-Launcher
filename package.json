@@ -1,14 +1,14 @@
 {
   "name": "uxa-launcher",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "cargo test -p launcher-core"
+    "test": "cargo test -p launcher-core -p uxa-server-agent"
   },
   "dependencies": {
     "@fontsource/cinzel": "^5.2.8",

@@ -12,6 +12,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 
 npm ci
 npm test
+cargo build -p uxa-server-agent --release
 npm run tauri build -- --bundles nsis
 
 $installer = Get-ChildItem -Path "src-tauri\target\release\bundle\nsis\*.exe" | Select-Object -First 1
@@ -19,3 +20,7 @@ if (-not $installer) {
     throw "NSIS installer was not produced."
 }
 Write-Host "Installer: $($installer.FullName)"
+$agent = Join-Path (Get-Location) "target\release\uxa-server-agent.exe"
+if (Test-Path $agent) {
+    Write-Host "Server agent: $agent"
+}

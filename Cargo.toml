@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/launcher-core", "src-tauri"]
+members = ["crates/launcher-core", "crates/server-agent", "src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["uXa"]
 description = "uXa guild game launcher"

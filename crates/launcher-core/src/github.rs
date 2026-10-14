@@ -128,10 +128,29 @@ fn next_page(link: &str) -> Option<String> {
     None
 }
 
-pub async fn find_latest_release(
+fn into_release(release: GhRelease, asset: GhAsset) -> ReleaseInfo {
+    tracing::info!("selected release {} asset {}", release.tag_name, asset.name);
+    ReleaseInfo {
+        tag: release.tag_name,
+        name: release.name.unwrap_or_default(),
+        body: release.body.unwrap_or_default(),
+        prerelease: release.prerelease,
+        html_url: release.html_url.unwrap_or_default(),
+        asset: ReleaseAsset {
+            name: asset.name,
+            api_url: asset.url,
+            browser_download_url: asset.browser_download_url,
+            size: asset.size,
+            digest: asset.digest.filter(|d| !d.is_empty()),
+        },
+    }
+}
+
+/// Every non-draft release (newest first, up to five pages) that has a matching zip.
+pub async fn list_matching_releases(
     client: &reqwest::Client,
     source: &ReleaseSource,
-) -> Result<ReleaseInfo> {
+) -> Result<Vec<ReleaseInfo>> {
     let pattern = if source.asset_pattern.trim().is_empty() {
         None
     } else {
@@ -144,6 +163,7 @@ pub async fn find_latest_release(
         source.repo
     );
     let headers = headers(source.token.as_deref(), "application/vnd.github+json")?;
+    let mut found = Vec::new();
 
     for _ in 0..5 {
         let response = client.get(&url).headers(headers.clone()).send().await?;
@@ -158,35 +178,21 @@ pub async fn find_latest_release(
             return Err(Error::msg(friendly_status(status, &text)));
         }
         let releases: Vec<GhRelease> = serde_json::from_str(&text)?;
-        for release in releases {
+        for mut release in releases {
             if release.draft {
                 continue;
             }
             if release.prerelease && !source.include_prereleases {
                 continue;
             }
-            if let Some(asset) = release.assets.into_iter().find(|asset| {
+            let assets = std::mem::take(&mut release.assets);
+            if let Some(asset) = assets.into_iter().find(|asset| {
                 crate::patch::asset_matches(&asset.name, &source.asset_contains, pattern.as_ref())
             }) {
-                tracing::info!(
-                    "selected release {} asset {}",
-                    release.tag_name,
-                    asset.name
-                );
-                return Ok(ReleaseInfo {
-                    tag: release.tag_name,
-                    name: release.name.unwrap_or_default(),
-                    body: release.body.unwrap_or_default(),
-                    prerelease: release.prerelease,
-                    html_url: release.html_url.unwrap_or_default(),
-                    asset: ReleaseAsset {
-                        name: asset.name,
-                        api_url: asset.url,
-                        browser_download_url: asset.browser_download_url,
-                        size: asset.size,
-                        digest: asset.digest.filter(|d| !d.is_empty()),
-                    },
-                });
+                found.push(into_release(release, asset));
+                if found.len() >= 40 {
+                    return Ok(found);
+                }
             }
         }
         match link {
@@ -194,9 +200,42 @@ pub async fn find_latest_release(
             None => break,
         }
     }
-    Err(Error::msg(
-        "No release asset matched the configured name filter (expected a zip whose name contains the configured tokens, default Client and Win64).",
-    ))
+    Ok(found)
+}
+
+pub async fn find_latest_release(
+    client: &reqwest::Client,
+    source: &ReleaseSource,
+) -> Result<ReleaseInfo> {
+    list_matching_releases(client, source)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Error::msg(
+                "No release asset matched the configured name filter (expected a zip whose name contains the configured tokens, default Client and Win64).",
+            )
+        })
+}
+
+pub async fn find_release_by_tag(
+    client: &reqwest::Client,
+    source: &ReleaseSource,
+    tag: &str,
+) -> Result<ReleaseInfo> {
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return find_latest_release(client, source).await;
+    }
+    list_matching_releases(client, source)
+        .await?
+        .into_iter()
+        .find(|release| release.tag == tag)
+        .ok_or_else(|| {
+            Error::msg(format!(
+                "No release {tag} has a zip matching the configured name filter."
+            ))
+        })
 }
 
 /// Launcher self-update check. Empty owner/repo yields `Ok(None)` so v0.1 can ship before its own feed exists.

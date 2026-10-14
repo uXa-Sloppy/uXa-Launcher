@@ -333,8 +333,31 @@ fn move_dir(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
-/// Replace `install` with `staging`. On failure the previous install is put back.
-pub fn atomic_swap(staging: &Path, install: &Path) -> Result<()> {
+pub fn previous_install_dir(install: &Path) -> Result<PathBuf> {
+    let parent = install
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| Error::msg("install path has no parent"))?;
+    let name = install
+        .file_name()
+        .ok_or_else(|| Error::msg("install path has no name"))?;
+    Ok(parent.join(format!("{}.previous", name.to_string_lossy())))
+}
+
+fn failed_install_dir(install: &Path) -> Result<PathBuf> {
+    let parent = install
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| Error::msg("install path has no parent"))?;
+    let name = install
+        .file_name()
+        .ok_or_else(|| Error::msg("install path has no name"))?;
+    Ok(parent.join(format!("{}.failed", name.to_string_lossy())))
+}
+
+/// Replace `install` with `staging`. When `keep_backup` is false the previous
+/// copy is removed after a successful swap, which is the client patcher path.
+fn swap_dirs(staging: &Path, install: &Path, keep_backup: bool) -> Result<()> {
     if !staging.is_dir() {
         return Err(Error::msg("staging directory is missing"));
     }
@@ -343,10 +366,7 @@ pub fn atomic_swap(staging: &Path, install: &Path) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or_else(|| Error::msg("install path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let name = install
-        .file_name()
-        .ok_or_else(|| Error::msg("install path has no name"))?;
-    let backup = parent.join(format!("{}.previous", name.to_string_lossy()));
+    let backup = previous_install_dir(install)?;
     if backup.exists() {
         fs::remove_dir_all(&backup)?;
     }
@@ -370,7 +390,7 @@ pub fn atomic_swap(staging: &Path, install: &Path) -> Result<()> {
         }
         return Err(err);
     }
-    if backup.exists() {
+    if !keep_backup && backup.exists() {
         if let Err(err) = fs::remove_dir_all(&backup) {
             tracing::warn!(
                 "updated {} but could not remove the previous copy at {}: {err}",
@@ -378,6 +398,45 @@ pub fn atomic_swap(staging: &Path, install: &Path) -> Result<()> {
                 backup.display()
             );
         }
+    }
+    Ok(())
+}
+
+/// Replace `install` with `staging`. On failure the previous install is put back.
+pub fn atomic_swap(staging: &Path, install: &Path) -> Result<()> {
+    swap_dirs(staging, install, false)
+}
+
+/// Same swap as [`atomic_swap`], but the previous install stays at
+/// `{name}.previous` so a failed health check can restore it.
+pub fn swap_keeping_previous(staging: &Path, install: &Path) -> Result<()> {
+    swap_dirs(staging, install, true)
+}
+
+/// Put `{name}.previous` back at `install`. The rejected install is moved to `{name}.failed`.
+pub fn restore_previous(install: &Path) -> Result<()> {
+    let backup = previous_install_dir(install)?;
+    if !backup.is_dir() {
+        return Err(Error::msg(format!(
+            "no previous install to restore at {}",
+            backup.display()
+        )));
+    }
+    if install.exists() {
+        let failed = failed_install_dir(install)?;
+        if failed.exists() {
+            fs::remove_dir_all(&failed)?;
+        }
+        move_dir(install, &failed)?;
+    }
+    move_dir(&backup, install)?;
+    Ok(())
+}
+
+pub fn discard_previous(install: &Path) -> Result<()> {
+    let backup = previous_install_dir(install)?;
+    if backup.exists() {
+        fs::remove_dir_all(&backup)?;
     }
     Ok(())
 }

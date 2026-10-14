@@ -5,7 +5,8 @@
       "name": "Dolmar's Server",
       "host": "71.71.45.128",
       "port": 7777,
-      "default": true
+      "default": true,
+      "agentUrl": "https://71.71.45.128:8787"
     },
     {
       "id": "localhost",

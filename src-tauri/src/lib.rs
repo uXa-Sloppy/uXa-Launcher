@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use launcher_core::{
-    check_self_update, http_client, inspect_game as inspect_release, load_catalog, load_news,
-    load_servers, load_settings, patch_game, prepare_client_launch, probe_tcp, read_manifest,
-    resolve_install_dir, save_settings as write_settings, spawn_process, write_manifest, Catalog,
-    GameDef, GameSource, GameStatus, InspectRequest, NewsItem, PatchJob, PatchProgress,
-    ReleaseSource, ServerEntry, ServerMap, Settings,
+    agent_exchange, check_self_update, http_client, inspect_game as inspect_release, load_catalog,
+    load_news, load_servers, load_settings, patch_game, prepare_client_launch, probe_tcp,
+    read_manifest, resolve_install_dir, save_settings as write_settings, spawn_process,
+    write_manifest, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus, Catalog, GameDef,
+    GameSource, GameStatus, InspectRequest, NewsItem, PatchJob, PatchProgress, ReleaseSource,
+    ServerEntry, ServerMap, Settings,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -31,6 +32,8 @@ struct AppState {
     client: reqwest::Client,
     settings: Mutex<Settings>,
     patching: Mutex<HashSet<String>>,
+    /// Admin key for this process. Never written to settings.json.
+    agent_secret: Mutex<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -53,6 +56,7 @@ struct Bootstrap {
     data_dir: String,
     log_dir: String,
     has_github_token: bool,
+    has_agent_secret: bool,
     settings: Settings,
     games: Vec<GameView>,
     news: Vec<NewsItem>,
@@ -271,6 +275,7 @@ fn views(catalog: &Catalog, servers: &ServerMap) -> Vec<GameView> {
                 .is_empty()
                 .then(Vec::new)
                 .unwrap_or_else(|| servers.get(&game.servers_key).cloned().unwrap_or_default());
+            let list = apply_agent_override(list);
             GameView {
                 id: game.id.clone(),
                 name: game.name.clone(),
@@ -285,6 +290,22 @@ fn views(catalog: &Catalog, servers: &ServerMap) -> Vec<GameView> {
             }
         })
         .collect()
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn apply_agent_override(mut servers: Vec<ServerEntry>) -> Vec<ServerEntry> {
+    if let Some(url) = env_string("UXA_AGENT_URL") {
+        for server in &mut servers {
+            server.agent_url = url.clone();
+        }
+    }
+    servers
 }
 
 fn update_repo(settings: &Settings, catalog: &Catalog) -> (String, String) {
@@ -379,6 +400,7 @@ async fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
         data_dir: state.paths.data_dir.display().to_string(),
         log_dir: state.paths.log_dir.display().to_string(),
         has_github_token: load_token(&state.paths.data_dir).is_some(),
+        has_agent_secret: agent_secret_available(&state),
         settings,
         games: views(&catalog, &servers),
         news,
@@ -645,6 +667,279 @@ async fn check_launcher_update(state: State<'_, AppState>) -> Result<Option<laun
     Ok(update)
 }
 
+fn agent_secret_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("agent-secret")
+}
+
+fn read_agent_secret_file(data_dir: &Path) -> Option<String> {
+    fs::read_to_string(agent_secret_path(data_dir))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(windows)]
+fn agent_keyring() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("uXa Launcher", "agent-secret").map_err(|err| err.to_string())
+}
+
+#[cfg(windows)]
+fn store_agent_secret_secure(secret: &str) -> Result<(), String> {
+    let entry = agent_keyring()?;
+    if secret.is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    } else {
+        entry.set_password(secret).map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(windows)]
+fn load_agent_secret_secure() -> Result<Option<String>, String> {
+    let entry = agent_keyring()?;
+    match entry.get_password() {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn load_agent_secret(data_dir: &Path) -> Option<String> {
+    #[cfg(windows)]
+    if let Ok(Some(secret)) = load_agent_secret_secure() {
+        return Some(secret);
+    }
+    read_agent_secret_file(data_dir)
+}
+
+fn validate_agent_secret(secret: &str) -> Result<&str, String> {
+    let secret = secret.trim();
+    if secret.is_empty() || secret.len() > 512 || secret.chars().any(|ch| ch.is_control()) {
+        return Err("Enter the admin key with no line breaks.".into());
+    }
+    Ok(secret)
+}
+
+fn write_agent_secret_file(data_dir: &Path, secret: &str) -> Result<(), String> {
+    let path = agent_secret_path(data_dir);
+    fs::write(&path, secret).map_err(|err| err.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn save_agent_secret(data_dir: &Path, secret: &str) -> Result<(), String> {
+    let secret = validate_agent_secret(secret)?;
+    #[cfg(windows)]
+    {
+        if store_agent_secret_secure(secret).is_ok() {
+            let _ = fs::remove_file(agent_secret_path(data_dir));
+            tracing::info!("admin key stored in Windows Credential Manager");
+            return Ok(());
+        }
+        tracing::warn!("Credential Manager unavailable; storing the admin key in a user-only file");
+    }
+    write_agent_secret_file(data_dir, secret)?;
+    tracing::info!("admin key stored for this user");
+    Ok(())
+}
+
+fn clear_agent_secret(data_dir: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = store_agent_secret_secure("");
+    }
+    let path = agent_secret_path(data_dir);
+    if path.exists() {
+        fs::remove_file(path).map_err(|err| err.to_string())?;
+    }
+    tracing::info!("admin key cleared");
+    Ok(())
+}
+
+fn agent_secret_available(state: &AppState) -> bool {
+    state
+        .agent_secret
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .is_some()
+        || load_agent_secret(&state.paths.data_dir).is_some()
+}
+
+fn remember_agent_secret(state: &AppState, secret: &str) {
+    if let Ok(mut slot) = state.agent_secret.lock() {
+        *slot = Some(secret.to_string());
+    }
+}
+
+fn current_agent_secret(state: &AppState) -> Result<String, String> {
+    if let Some(secret) = state.agent_secret.lock().map_err(|err| err.to_string())?.clone() {
+        return Ok(secret);
+    }
+    if let Some(secret) = load_agent_secret(&state.paths.data_dir) {
+        remember_agent_secret(state, &secret);
+        return Ok(secret);
+    }
+    Err("Enter the admin key in Settings.".into())
+}
+
+fn find_server_by_id(servers: &ServerMap, id: &str) -> Result<ServerEntry, String> {
+    for list in servers.values() {
+        if let Some(server) = list.iter().find(|server| server.id == id) {
+            return Ok(server.clone());
+        }
+    }
+    Err("That server is not in the list.".into())
+}
+
+fn resolve_agent_url(server: &ServerEntry) -> Result<String, String> {
+    if let Some(url) = env_string("UXA_AGENT_URL") {
+        return Ok(url);
+    }
+    let url = server.agent_url.trim();
+    if url.is_empty() {
+        return Err(format!(
+            "{} has no server agent address. Add agentUrl in servers.json.",
+            server.name
+        ));
+    }
+    Ok(url.to_string())
+}
+
+async fn agent_status_at(
+    state: &AppState,
+    server_id: &str,
+    secret: &str,
+) -> Result<AgentStatus, String> {
+    let (_, servers) = load_library(&state.paths)?;
+    let server = find_server_by_id(&servers, server_id)?;
+    let url = resolve_agent_url(&server)?;
+    let body = agent_exchange(&state.client, &url, secret, "GET", "/v1/status", b"")
+        .await
+        .map_err(|err| err.to_string())?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+async fn agent_call(
+    state: &AppState,
+    server_id: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<String, String> {
+    let secret = current_agent_secret(state)?;
+    let (_, servers) = load_library(&state.paths)?;
+    let server = find_server_by_id(&servers, server_id)?;
+    let url = resolve_agent_url(&server)?;
+    tracing::info!(server = %server.name, %method, %path, "admin request");
+    agent_exchange(&state.client, &url, &secret, method, path, body)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn unlock_admin(
+    state: State<'_, AppState>,
+    secret: String,
+    server_id: String,
+    remember: bool,
+) -> Result<AgentStatus, String> {
+    let secret = validate_agent_secret(&secret)?.to_string();
+    let status = agent_status_at(&state, &server_id, &secret).await?;
+    if remember {
+        save_agent_secret(&state.paths.data_dir, &secret)?;
+    } else {
+        clear_agent_secret(&state.paths.data_dir)?;
+    }
+    remember_agent_secret(&state, &secret);
+    tracing::info!(server = %server_id, remember, "admin key accepted");
+    Ok(status)
+}
+
+#[tauri::command]
+async fn admin_probe(state: State<'_, AppState>, server_id: String) -> Result<AgentStatus, String> {
+    let secret = current_agent_secret(&state)?;
+    match agent_status_at(&state, &server_id, &secret).await {
+        Ok(status) => Ok(status),
+        Err(err) if err.contains("rejected") => {
+            if let Ok(mut slot) = state.agent_secret.lock() {
+                *slot = None;
+            }
+            let _ = clear_agent_secret(&state.paths.data_dir);
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[tauri::command]
+fn forget_admin(state: State<'_, AppState>) -> Result<(), String> {
+    if let Ok(mut slot) = state.agent_secret.lock() {
+        *slot = None;
+    }
+    clear_agent_secret(&state.paths.data_dir)
+}
+
+#[tauri::command]
+async fn admin_releases(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<Vec<AgentReleaseSummary>, String> {
+    let body = agent_call(&state, &server_id, "GET", "/v1/releases", b"").await?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn admin_logs(
+    state: State<'_, AppState>,
+    server_id: String,
+    after: u64,
+) -> Result<Vec<AgentLogLine>, String> {
+    let body = agent_call(
+        &state,
+        &server_id,
+        "GET",
+        &format!("/v1/logs?after={after}"),
+        b"",
+    )
+    .await?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
+    let lines = parsed.get("lines").cloned().unwrap_or(serde_json::Value::Null);
+    serde_json::from_value(lines).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn admin_deploy(
+    state: State<'_, AppState>,
+    server_id: String,
+    tag: String,
+) -> Result<AgentAction, String> {
+    let payload = serde_json::to_vec(&serde_json::json!({ "tag": tag })).map_err(|err| err.to_string())?;
+    tracing::info!(server = %server_id, %tag, "admin deploy");
+    let body = agent_call(&state, &server_id, "POST", "/v1/deploy", &payload).await?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn admin_restart(state: State<'_, AppState>, server_id: String) -> Result<AgentAction, String> {
+    tracing::info!(server = %server_id, "admin restart");
+    let body = agent_call(&state, &server_id, "POST", "/v1/restart", b"").await?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn admin_stop(state: State<'_, AppState>, server_id: String) -> Result<AgentAction, String> {
+    tracing::info!(server = %server_id, "admin stop");
+    let body = agent_call(&state, &server_id, "POST", "/v1/stop", b"").await?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 async fn refresh_news(state: State<'_, AppState>) -> Result<Vec<NewsItem>, String> {
     let (catalog, _) = load_library(&state.paths)?;
@@ -678,6 +973,7 @@ pub fn run() {
             client,
             settings: Mutex::new(settings),
             patching: Mutex::new(HashSet::new()),
+            agent_secret: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
@@ -691,7 +987,15 @@ pub fn run() {
             open_logs,
             open_url,
             check_launcher_update,
-            refresh_news
+            refresh_news,
+            unlock_admin,
+            admin_probe,
+            forget_admin,
+            admin_releases,
+            admin_logs,
+            admin_deploy,
+            admin_restart,
+            admin_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running uXa Launcher");

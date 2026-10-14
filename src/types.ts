@@ -4,6 +4,7 @@ export interface ServerEntry {
   host: string;
   port: number;
   default?: boolean;
+  agentUrl?: string;
 }
 
 export interface GameView {
@@ -39,6 +40,7 @@ export interface Bootstrap {
   dataDir: string;
   logDir: string;
   hasGithubToken: boolean;
+  hasAgentSecret: boolean;
   settings: Settings;
   games: GameView[];
   news: NewsItem[];
@@ -78,4 +80,32 @@ export interface LauncherUpdate {
 export interface PlayResult {
   pid?: number | null;
   openedUrl?: string | null;
+}
+
+export interface AgentStatus {
+  version: string;
+  online: boolean;
+  uptimeSecs: number;
+  playerCount: number | null;
+  port: number;
+  phase: string;
+}
+
+export interface AgentRelease {
+  tag: string;
+  name: string;
+  prerelease: boolean;
+  assetName: string;
+}
+
+export interface AgentLogLine {
+  id: number;
+  at: string;
+  message: string;
+}
+
+export interface AgentAction {
+  ok: boolean;
+  message: string;
+  status: AgentStatus;
 }

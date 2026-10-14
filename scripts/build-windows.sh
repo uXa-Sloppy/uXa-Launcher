@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "Running launcher-core tests..."
-cargo test -p launcher-core
+echo "Running launcher and server-agent tests..."
+cargo test -p launcher-core -p uxa-server-agent
 
 if [[ "$(uname -s)" == "MINGW"* || "$(uname -s)" == "Windows_NT" ]]; then
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1

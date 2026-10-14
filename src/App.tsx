@@ -4,12 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { inTauri, launcherApi } from "./api";
 import type {
+  AgentLogLine,
+  AgentRelease,
+  AgentStatus,
   Bootstrap,
   GameStatus,
   GameView,
   LauncherUpdate,
   NewsItem,
   PatchProgress,
+  ServerEntry,
   Settings,
 } from "./types";
 
@@ -47,6 +51,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [newsOpen, setNewsOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdate | null>(null);
   const [actionError, setActionError] = useState("");
@@ -95,6 +101,24 @@ export default function App() {
       stop = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!boot?.hasAgentSecret) return;
+    const server = boot.games.flatMap((game) => game.servers).find((entry) => entry.agentUrl);
+    if (!server) return;
+    let stop = false;
+    api.adminProbe(server.id).then(
+      () => {
+        if (!stop) setAdminUnlocked(true);
+      },
+      () => {
+        if (!stop) setAdminUnlocked(false);
+      },
+    );
+    return () => {
+      stop = true;
+    };
+  }, [boot?.hasAgentSecret]);
 
   useEffect(() => {
     if (!boot) return;
@@ -277,9 +301,16 @@ export default function App() {
           </div>
         </div>
         <div className="library-foot">
-          <button type="button" className="gear" onClick={() => setSettingsOpen(true)}>
-            <Gear /> Settings
-          </button>
+          <span className="foot-actions">
+            <button type="button" className="gear" onClick={() => setSettingsOpen(true)}>
+              <Gear /> Settings
+            </button>
+            {adminUnlocked && (
+              <button type="button" className="gear" onClick={() => setAdminOpen(true)}>
+                <Shield /> Admin
+              </button>
+            )}
+          </span>
           <span>Launcher {boot.displayVersion}</span>
         </div>
       </aside>
@@ -391,10 +422,17 @@ export default function App() {
       <SettingsDialog
         open={settingsOpen}
         boot={boot}
+        adminUnlocked={adminUnlocked}
         onOpenChange={setSettingsOpen}
         onSaved={(next, hasToken) => setBoot({ ...boot, settings: next, hasGithubToken: hasToken })}
         onNews={setNews}
+        onAdmin={(unlocked, remembered) => {
+          setAdminUnlocked(unlocked);
+          setBoot((current) => current ? { ...current, hasAgentSecret: remembered } : current);
+          if (unlocked) setAdminOpen(true);
+        }}
       />
+      <AdminDialog open={adminOpen} boot={boot} onOpenChange={setAdminOpen} />
       <MarkdownDialog open={notesOpen} onOpenChange={setNotesOpen} title={notesTitle} body={status?.patchNotes ?? ""} />
       <Dialog.Root open={newsOpen} onOpenChange={setNewsOpen}>
         <Dialog.Portal>
@@ -409,6 +447,204 @@ export default function App() {
         </Dialog.Portal>
       </Dialog.Root>
     </div>
+  );
+}
+
+function adminServers(boot: Bootstrap): Array<ServerEntry & { game: string }> {
+  return boot.games.flatMap((game) =>
+    game.servers.filter((server) => server.agentUrl).map((server) => ({ ...server, game: game.name })),
+  );
+}
+
+function formatUptime(seconds: number): string {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function AdminDialog({
+  open,
+  boot,
+  onOpenChange,
+}: {
+  open: boolean;
+  boot: Bootstrap;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const servers = adminServers(boot);
+  const [serverId, setServerId] = useState(servers[0]?.id ?? "");
+  const [releases, setReleases] = useState<AgentRelease[]>([]);
+  const [tag, setTag] = useState("");
+  const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [logs, setLogs] = useState<AgentLogLine[]>([]);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<null | "deploy" | "restart" | "stop">(null);
+  const after = useRef(0);
+
+  const server = servers.find((entry) => entry.id === serverId) ?? servers[0];
+  const activeId = server?.id ?? "";
+
+  const refresh = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      const next = await api.adminProbe(activeId);
+      setStatus(next);
+      const lines = await api.adminLogs(activeId, after.current);
+      if (lines.length > 0) {
+        after.current = lines[lines.length - 1].id;
+        setLogs((prev) => [...prev, ...lines].slice(-200));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [activeId]);
+
+  useEffect(() => {
+    if (!open || !activeId) return;
+    let stop = false;
+    setLogs([]);
+    after.current = 0;
+    setError("");
+    api.adminReleases(activeId).then(
+      (list) => {
+        if (stop) return;
+        setReleases(list);
+        setTag((current) => current || list[0]?.tag || "");
+      },
+      (err: unknown) => {
+        if (!stop) setError(err instanceof Error ? err.message : String(err));
+      },
+    );
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, [open, activeId, refresh]);
+
+  async function run(action: "deploy" | "restart" | "stop") {
+    if (!server) return;
+    setConfirm(null);
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = action === "deploy"
+        ? await api.adminDeploy(server.id, tag)
+        : action === "restart"
+          ? await api.adminRestart(server.id)
+          : await api.adminStop(server.id);
+      setStatus(result.status);
+      setNotice(result.message);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const confirmCopy = confirm === "deploy"
+    ? `Deploy ${tag || "the selected build"} to ${server?.name ?? "this server"}? Players get a warning, world saves are backed up, then the server restarts. If the new build does not stay up, the previous build is restored.`
+    : confirm === "restart"
+      ? `Restart ${server?.name ?? "this server"} on the current build? Players get a warning first.`
+      : `Stop ${server?.name ?? "this server"}? Players get a warning, then the process exits.`;
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="overlay" />
+        <Dialog.Content className="dialog wide">
+          <Dialog.Title asChild><h2>Server admin</h2></Dialog.Title>
+          <Dialog.Description className="muted">
+            Deploy a Friday Night Fights dedicated server. The agent on that machine checks the admin key on every request.
+          </Dialog.Description>
+          {servers.length === 0 ? (
+            <p className="error-line">No server has an agent address. Add agentUrl in servers.json.</p>
+          ) : (
+            <>
+              <label className="field">
+                <span>Server</span>
+                <select aria-label="Admin server" value={server?.id ?? ""} onChange={(event) => {
+                  setServerId(event.target.value);
+                  setTag("");
+                  setLogs([]);
+                  after.current = 0;
+                }}>
+                  {servers.map((entry) => (
+                    <option key={entry.id} value={entry.id}>{entry.game} — {entry.name}</option>
+                  ))}
+                </select>
+                {server && <small>{server.agentUrl}</small>}
+              </label>
+              <label className="field">
+                <span>Release</span>
+                <select aria-label="Server release" value={tag} onChange={(event) => setTag(event.target.value)}>
+                  {releases.length === 0 && <option value="">No matching releases</option>}
+                  {releases.map((release) => (
+                    <option key={release.tag} value={release.tag}>
+                      {release.tag}{release.prerelease ? " (pre-release)" : ""} — {release.assetName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="status-line">
+                <span>Version {status?.version || "—"}</span>
+                <span className={status?.online ? "ok" : ""}>{status?.online ? "Online" : "Offline"}</span>
+                <span>Uptime {status?.online ? formatUptime(status.uptimeSecs) : "—"}</span>
+                <span>Players {status?.playerCount ?? "—"}</span>
+                <span>{status?.phase || "—"}</span>
+              </div>
+              <div className="row-actions">
+                <button type="button" className="btn primary" disabled={busy || !tag} onClick={() => setConfirm("deploy")}>
+                  Deploy &amp; Restart
+                </button>
+                <button type="button" className="btn" disabled={busy} onClick={() => setConfirm("restart")}>
+                  Restart only
+                </button>
+                <button type="button" className="btn danger" disabled={busy} onClick={() => setConfirm("stop")}>
+                  Stop
+                </button>
+              </div>
+              <pre className="admin-log" aria-live="polite">
+                {logs.length === 0 ? "Waiting for agent log…" : logs.map((line) => `${line.at}  ${line.message}`).join("\n")}
+              </pre>
+            </>
+          )}
+          {notice && <p className="token-status">{notice}</p>}
+          {error && <p className="error-line">{error}</p>}
+          <div className="dialog-actions">
+            <Dialog.Close className="btn">Close</Dialog.Close>
+          </div>
+          <Dialog.Root open={confirm !== null} onOpenChange={(next) => { if (!next) setConfirm(null); }}>
+            <Dialog.Portal>
+              <Dialog.Overlay className="overlay" />
+              <Dialog.Content className="dialog">
+                <Dialog.Title asChild><h2>Confirm</h2></Dialog.Title>
+                <Dialog.Description>{confirmCopy}</Dialog.Description>
+                <div className="dialog-actions">
+                  <button type="button" className="btn" onClick={() => setConfirm(null)}>Cancel</button>
+                  <button
+                    type="button"
+                    className={confirm === "stop" ? "btn danger" : "btn primary"}
+                    onClick={() => { if (confirm) void run(confirm); }}
+                  >
+                    {confirm === "deploy" ? "Deploy" : confirm === "restart" ? "Restart" : "Stop"}
+                  </button>
+                </div>
+              </Dialog.Content>
+            </Dialog.Portal>
+          </Dialog.Root>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -435,21 +671,28 @@ function NewsList({ items }: { items: NewsItem[] }) {
 function SettingsDialog({
   open,
   boot,
+  adminUnlocked,
   onOpenChange,
   onSaved,
   onNews,
+  onAdmin,
 }: {
   open: boolean;
   boot: Bootstrap;
+  adminUnlocked: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: (settings: Settings, hasToken: boolean) => void;
   onNews: (items: NewsItem[]) => void;
+  onAdmin: (unlocked: boolean, remembered: boolean) => void;
 }) {
   const [draft, setDraft] = useState(boot.settings);
   const [token, setToken] = useState("");
   const [hasToken, setHasToken] = useState(boot.hasGithubToken);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [adminKey, setAdminKey] = useState("");
+  const [rememberAdmin, setRememberAdmin] = useState(false);
+  const [adminMessage, setAdminMessage] = useState("");
 
   useEffect(() => {
     if (open) {
@@ -458,6 +701,8 @@ function SettingsDialog({
       setToken("");
       setMessage("");
       setError("");
+      setAdminKey("");
+      setAdminMessage("");
     }
   }, [open, boot]);
 
@@ -571,8 +816,69 @@ function SettingsDialog({
               placeholder="GitHub repo"
               onChange={(event) => setDraft({ ...draft, launcherUpdateRepo: event.target.value })}
             />
-            <small>Optional. v0.1 only reports a newer release; it does not install it.</small>
+            <small>Optional. A newer release is reported here; the launcher does not install it.</small>
           </label>
+          <div className="admin-key">
+            <label className="field">
+              <span>Admin key</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={adminKey}
+                placeholder={boot.hasAgentSecret || adminUnlocked ? "Key saved — enter it again to replace" : "Server agent shared key"}
+                onChange={(event) => setAdminKey(event.target.value)}
+              />
+              <small>Unlocks server deploy for this session. It is not written into settings.</small>
+            </label>
+            <label className="switch-row">
+              <span>Remember admin key on this PC</span>
+              <Switch.Root className="switch" checked={rememberAdmin} onCheckedChange={setRememberAdmin}>
+                <Switch.Thumb />
+              </Switch.Root>
+            </label>
+            <div className="row-actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const server = boot.games.flatMap((game) => game.servers).find((entry) => entry.agentUrl);
+                  if (!server) {
+                    setError("No server has an agent address.");
+                    return;
+                  }
+                  setError("");
+                  void api.unlockAdmin(adminKey, server.id, rememberAdmin).then(
+                    () => {
+                      setAdminKey("");
+                      setAdminMessage("Admin key accepted.");
+                      onAdmin(true, rememberAdmin);
+                    },
+                    (err: unknown) => setError(err instanceof Error ? err.message : String(err)),
+                  );
+                }}
+              >
+                Unlock admin
+              </button>
+              {(boot.hasAgentSecret || adminUnlocked) && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    void api.forgetAdmin().then(
+                      () => {
+                        setAdminMessage("Admin key removed.");
+                        onAdmin(false, false);
+                      },
+                      (err: unknown) => setError(err instanceof Error ? err.message : String(err)),
+                    );
+                  }}
+                >
+                  Forget admin key
+                </button>
+              )}
+            </div>
+            {adminMessage && <p className="token-status">{adminMessage}</p>}
+          </div>
           {message && <p className="token-status">{message}</p>}
           {error && <p className="error-line">{error}</p>}
           <div className="dialog-actions">
