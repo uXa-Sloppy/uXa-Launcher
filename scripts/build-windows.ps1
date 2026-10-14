@@ -15,7 +15,7 @@ npm test
 cargo build -p uxa-server-agent --release
 npm run tauri build -- --bundles nsis
 
-$installer = Get-ChildItem -Path "src-tauri\target\release\bundle\nsis\*.exe" | Select-Object -First 1
+$installer = Get-ChildItem -Path "target\release\bundle\nsis\*.exe","src-tauri\target\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $installer) {
     throw "NSIS installer was not produced."
 }
