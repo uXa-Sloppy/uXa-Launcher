@@ -202,6 +202,8 @@ fn walkdir_simple(dir: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+// The fake server is a /bin/sh script; Windows cannot execute it (os error 216).
+#[cfg(unix)]
 #[tokio::test]
 async fn deploy_preserves_saves_and_rolls_back() {
     let temp = tempfile::tempdir().unwrap();
