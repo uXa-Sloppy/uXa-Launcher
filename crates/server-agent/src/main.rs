@@ -8,6 +8,8 @@ fn foreground() -> Result<(), String> {
 }
 
 fn main() {
+    // axum-server pulls in aws-lc-rs and reqwest pulls in ring, so rustls cannot pick a provider by itself.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let service = std::env::args().any(|arg| arg == "--service");
     if service {
         #[cfg(windows)]
