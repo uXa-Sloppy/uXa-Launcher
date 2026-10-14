@@ -30,3 +30,5 @@ src-tauri/gen
 
 # Local launcher data created during demos
 .uxa-dev/
+__pycache__/
+*.pyc
