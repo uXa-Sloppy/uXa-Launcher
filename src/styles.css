@@ -438,11 +438,11 @@ button:disabled { cursor: default; }
 }
 .dialog {
   position: fixed;
-  top: 50%;
+  top: 24px;
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   width: min(560px, calc(100vw - 32px));
-  max-height: min(86vh, 760px);
+  max-height: calc(100vh - 48px);
   overflow: auto;
   background: #141714;
   color: var(--gold);

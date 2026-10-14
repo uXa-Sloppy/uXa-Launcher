@@ -8,6 +8,8 @@ Desktop launcher for the uXa gaming guild, version **0.2.0**. It installs and pa
 
 ![Settings](docs/screenshots/settings.png)
 
+![Server admin after a mock deploy](docs/screenshots/admin.png)
+
 ## What it does
 
 - **Game library** from `config/games.json`, so another game is a config change.
