@@ -26,4 +26,4 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(windows)'.dependencies]
-keyring = "3"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
