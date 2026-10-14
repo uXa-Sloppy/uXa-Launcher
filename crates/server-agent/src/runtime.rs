@@ -320,7 +320,8 @@ impl Agent {
                 Ok(None) => self.log("no Saved folder to back up"),
                 Err(err) => {
                     let _ = fs::remove_dir_all(&staging);
-                    return Err(Fail::msg(500, format!("save backup failed: {err}")));
+                    let _ = self.start_installed().await;
+                    return Err(Fail::msg(500, format!("save backup failed: {err}. The current build was restarted.")));
                 }
             }
             if let Err(err) = copy_preserved(
@@ -329,7 +330,8 @@ impl Agent {
                 &self.config.preserve,
             ) {
                 let _ = fs::remove_dir_all(&staging);
-                return Err(Fail::msg(500, format!("could not preserve saves and config: {err}")));
+                let _ = self.start_installed().await;
+                return Err(Fail::msg(500, format!("could not preserve saves and config: {err}. The current build was restarted.")));
             }
             self.log(format!(
                 "preserved {}",
@@ -341,7 +343,11 @@ impl Agent {
         self.set_phase("deploying");
         if let Err(err) = swap_keeping_previous(&staging, &self.config.install_dir) {
             let _ = fs::remove_dir_all(&staging);
-            return Err(Fail::msg(500, format!("swap failed: {err}")));
+            let reason = format!("swap failed: {err}");
+            if let Err(rollback_err) = self.rollback(&reason).await {
+                return Err(Fail::msg(500, format!("Deploy failed ({reason}) and rollback failed: {}", rollback_err.message)));
+            }
+            return Err(Fail::msg(500, format!("Deploy failed ({reason}). Previous build restored.")));
         }
         self.log(format!("swapped in {}", release.tag));
         if let Ok(mut slot) = self.version.lock() {
@@ -452,6 +458,16 @@ impl Agent {
     async fn kill_running(&self) -> Result<(), Fail> {
         let mut guard = self.process.lock().await;
         if let Some(mut running) = guard.take() {
+            // The UE dedicated server is a bootstrap exe that spawns Binaries\Win64\...Server.exe.
+            // Killing only the bootstrap leaves the real server running and its files locked.
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &running.child.id().to_string(), "/T", "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
             let _ = running.child.kill();
             let _ = running.child.wait();
         }
