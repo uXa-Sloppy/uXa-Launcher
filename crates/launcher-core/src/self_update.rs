@@ -689,6 +689,37 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  uxa-launcher.e
     }
 
     #[test]
+    fn self_update_and_second_install_keep_saved_key_and_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("uXa").join("Launcher");
+        let install = dir.path().join("uXa Launcher");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&install).unwrap();
+        let settings = br#"{"checkOnStart":true,"selectedServer":{"friday-night-fights":"dolmar"}}"#;
+        let servers = br#"{"friday-night-fights":[{"id":"dolmar","agentUrl":"https://tunnel.example"}]}"#;
+        let key = b"saved-admin-key-value";
+        let token = b"ghp_savedtokenvalue";
+        fs::write(data.join("settings.json"), settings).unwrap();
+        fs::write(data.join("servers.json"), servers).unwrap();
+        fs::write(data.join("agent-secret"), key).unwrap();
+        fs::write(data.join("github-token"), token).unwrap();
+        let current = install.join("uxa-launcher.exe");
+        fs::write(&current, b"v0.3.0").unwrap();
+        let staged = dir.path().join("staged.exe");
+        fs::write(&staged, b"v0.3.1").unwrap();
+
+        replace_executable(&current, &staged).unwrap();
+        fs::write(&staged, b"v0.3.1-setup").unwrap();
+        replace_executable(&current, &staged).unwrap();
+
+        assert_eq!(fs::read(&current).unwrap(), b"v0.3.1-setup");
+        assert_eq!(fs::read(data.join("settings.json")).unwrap(), settings);
+        assert_eq!(fs::read(data.join("servers.json")).unwrap(), servers);
+        assert_eq!(fs::read(data.join("agent-secret")).unwrap(), key);
+        assert_eq!(fs::read(data.join("github-token")).unwrap(), token);
+    }
+
+    #[test]
     fn missing_download_does_not_touch_the_exe() {
         let dir = tempfile::tempdir().unwrap();
         let current = dir.path().join("uxa-launcher.exe");
