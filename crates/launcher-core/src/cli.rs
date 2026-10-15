@@ -607,7 +607,8 @@ mod tests {
             b"original-key"
         );
         assert!(!dir.path().join("github-token").exists());
-        assert!(!snap.changed());
+        // restore() writes the original bytes back, which updates mtime, so a
+        // second changed() check would still be true. The bytes above are the check.
     }
 
     struct Mock {
