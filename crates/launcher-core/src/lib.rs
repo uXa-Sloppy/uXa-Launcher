@@ -50,7 +50,7 @@ pub use self_update::{
     LAUNCHER_EXE_ASSET,
 };
 pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
-pub use version::{is_newer, parse_version};
+pub use version::{is_newer, parse_version, GameVersion};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
 pub const USER_AGENT: &str = "uXa-Launcher/0.3.1";
