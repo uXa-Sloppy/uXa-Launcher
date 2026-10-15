@@ -132,7 +132,7 @@ On a Windows machine, from this directory:
 powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 ```
 
-The setup executable is written to `src-tauri\target\release\bundle\nsis\`.
+The setup executable is written to `target\release\bundle\nsis\` (the Cargo workspace target directory).
 
 You need Node.js 22+, Rust stable, and the Visual Studio C++ build tools. WebView2 is already present on current Windows 11 images and on GitHub-hosted runners.
 

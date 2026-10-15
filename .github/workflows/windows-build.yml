@@ -3,6 +3,7 @@ name: Windows build
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -39,7 +40,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: uxa-launcher-windows
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          # Cargo workspace target dir is the repo root, not src-tauri/target.
+          path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
       - name: Upload server agent
         uses: actions/upload-artifact@v4
