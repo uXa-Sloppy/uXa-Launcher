@@ -32,7 +32,7 @@ pub struct LauncherInfo {
 }
 
 fn default_display() -> String {
-    "v0.2".to_string()
+    "v0.3".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +59,11 @@ pub struct GameDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 pub enum GameSource {
     GithubRelease {
         owner: String,
@@ -214,7 +218,11 @@ pub fn write_manifest(path: &Path, manifest: &InstalledManifest) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_install_dir(settings: &Settings, default_root: &Path, game: &GameDef) -> Result<PathBuf> {
+pub fn resolve_install_dir(
+    settings: &Settings,
+    default_root: &Path,
+    game: &GameDef,
+) -> Result<PathBuf> {
     if let Some(over) = settings.install_overrides.get(&game.id) {
         let trimmed = over.trim();
         if !trimmed.is_empty() {
@@ -222,7 +230,10 @@ pub fn resolve_install_dir(settings: &Settings, default_root: &Path, game: &Game
         }
     }
     if game.install_dir_name.trim().is_empty() {
-        return Err(Error::msg(format!("{} has no install directory name", game.name)));
+        return Err(Error::msg(format!(
+            "{} has no install directory name",
+            game.name
+        )));
     }
     let root = if settings.install_root.trim().is_empty() {
         default_root.to_path_buf()
@@ -240,7 +251,9 @@ mod tests {
     fn bundled_catalog_parses() {
         let catalog = load_catalog(include_str!("../../../config/games.json")).unwrap();
         assert_eq!(catalog.games.len(), 2);
-        assert_eq!(catalog.launcher.version, "0.2.0");
+        assert_eq!(catalog.launcher.version, "0.3.0");
+        assert_eq!(catalog.launcher.update_owner, "uXa-Sloppy");
+        assert_eq!(catalog.launcher.update_repo, "uXa-Launcher");
         let servers = load_servers(include_str!("../../../config/servers.json")).unwrap();
         let list = servers.get("friday-night-fights").unwrap();
         assert_eq!(list[0].host, "71.71.45.128");

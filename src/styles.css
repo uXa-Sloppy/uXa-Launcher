@@ -160,8 +160,9 @@ button:disabled { cursor: default; }
 
 .update-banner {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   align-items: center;
   padding: 8px 12px;
   border-radius: 6px;
@@ -170,6 +171,7 @@ button:disabled { cursor: default; }
   color: #d7efcf;
   font-size: 14px;
 }
+.update-banner .bar { flex: 1 0 140px; }
 .update-banner button {
   border: 0;
   background: transparent;

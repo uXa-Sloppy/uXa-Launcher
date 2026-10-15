@@ -7,7 +7,8 @@ import type {
   AgentStatus,
   Bootstrap,
   GameStatus,
-  LauncherUpdate,
+  LauncherUpdateOutcome,
+  LauncherUpdateProgress,
   NewsItem,
   PatchProgress,
   PlayResult,
@@ -28,7 +29,8 @@ export interface LauncherApi {
   setToken(token: string): Promise<void>;
   clearToken(): Promise<void>;
   probe(host: string, port: number): Promise<string>;
-  checkLauncherUpdate(): Promise<LauncherUpdate | null>;
+  applyLauncherUpdate(): Promise<LauncherUpdateOutcome>;
+  onLauncherUpdate(handler: (progress: LauncherUpdateProgress) => void): Promise<() => void>;
   openLogs(): Promise<void>;
   openUrl(url: string): Promise<void>;
   refreshNews(): Promise<NewsItem[]>;
@@ -57,7 +59,13 @@ const tauriApi: LauncherApi = {
   setToken: (token) => invoke("set_github_token", { token }),
   clearToken: () => invoke("clear_github_token"),
   probe: (host, port) => invoke<string>("probe_server", { host, port }),
-  checkLauncherUpdate: () => invoke<LauncherUpdate | null>("check_launcher_update"),
+  applyLauncherUpdate: () => invoke<LauncherUpdateOutcome>("apply_launcher_update"),
+  async onLauncherUpdate(handler) {
+    const unlisten: UnlistenFn = await listen<LauncherUpdateProgress>("launcher-update", (event) => {
+      handler(event.payload);
+    });
+    return unlisten;
+  },
   openLogs: () => invoke("open_logs"),
   openUrl: (url) => invoke("open_url", { url }),
   refreshNews: () => invoke<NewsItem[]>("refresh_news"),
@@ -141,8 +149,8 @@ const previewNotes = `## v0.9.5 – The Brawler's Update
 
 function previewBootstrap(): Bootstrap {
   return {
-    launcherVersion: "0.2.0",
-    displayVersion: "v0.2",
+    launcherVersion: "0.3.0",
+    displayVersion: "v0.3",
     defaultInstallRoot: "%LOCALAPPDATA%\\uXa\\Games",
     dataDir: "%LOCALAPPDATA%\\uXa\\Launcher",
     logDir: "%LOCALAPPDATA%\\uXa\\Launcher\\logs",
@@ -242,8 +250,11 @@ const previewApi: LauncherApi = {
   async probe() {
     return "unknown";
   },
-  async checkLauncherUpdate() {
-    return null;
+  async applyLauncherUpdate() {
+    return { status: "current", latest: "", url: "", notes: "", message: "" };
+  },
+  async onLauncherUpdate() {
+    return () => undefined;
   },
   async openLogs() {},
   async openUrl(url: string) {

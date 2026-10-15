@@ -77,6 +77,22 @@ export interface LauncherUpdate {
   notes: string;
 }
 
+export interface LauncherUpdateProgress {
+  phase: string;
+  received: number;
+  total: number;
+  percent: number;
+  message: string;
+}
+
+export interface LauncherUpdateOutcome {
+  status: "current" | "restarting" | "available" | string;
+  latest: string;
+  url: string;
+  notes: string;
+  message: string;
+}
+
 export interface PlayResult {
   pid?: number | null;
   openedUrl?: string | null;

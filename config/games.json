@@ -1,10 +1,10 @@
 {
   "newsUrl": "",
   "launcher": {
-    "version": "0.2.0",
-    "displayVersion": "v0.2",
-    "updateOwner": "",
-    "updateRepo": ""
+    "version": "0.3.0",
+    "displayVersion": "v0.3",
+    "updateOwner": "uXa-Sloppy",
+    "updateRepo": "uXa-Launcher"
   },
   "games": [
     {

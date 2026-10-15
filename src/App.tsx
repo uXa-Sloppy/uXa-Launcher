@@ -11,6 +11,7 @@ import type {
   GameStatus,
   GameView,
   LauncherUpdate,
+  LauncherUpdateProgress,
   NewsItem,
   PatchProgress,
   ServerEntry,
@@ -55,8 +56,11 @@ export default function App() {
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdate | null>(null);
+  const [launcherProgress, setLauncherProgress] = useState<LauncherUpdateProgress | null>(null);
+  const [updateError, setUpdateError] = useState("");
   const [actionError, setActionError] = useState("");
   const patchingRef = useRef<string | null>(null);
+  const launcherUpdateStarted = useRef(false);
 
   const refreshStatus = useCallback(async (game: GameView, remote: boolean) => {
     setStatuses((prev) => ({
@@ -122,14 +126,17 @@ export default function App() {
 
   useEffect(() => {
     if (!boot) return;
-    let unlisten: () => void = () => {};
+    let stopped = false;
+    let unlistenPatch = () => {};
+    let unlistenUpdate = () => {};
     api.onPatch((event) => {
       setProgress(event);
       if (event.phase === "done" || event.phase === "error") {
         setPatchingId((current) => (current === event.gameId ? null : current));
       }
     }).then((off) => {
-      unlisten = off;
+      if (stopped) off();
+      else unlistenPatch = off;
     });
     const remote = boot.settings.checkOnStart;
     for (const game of boot.games) {
@@ -144,10 +151,40 @@ export default function App() {
         }
       });
     }
-    if (remote) {
-      api.checkLauncherUpdate().then(setLauncherUpdate).catch(() => setLauncherUpdate(null));
+    if (remote && !launcherUpdateStarted.current) {
+      launcherUpdateStarted.current = true;
+      api.onLauncherUpdate((event) => {
+        if (!stopped) setLauncherProgress(event);
+      }).then((off) => {
+        if (stopped) off();
+        else unlistenUpdate = off;
+      });
+      api.applyLauncherUpdate().then((result) => {
+        if (stopped) return;
+        if (result.status === "available") {
+          setLauncherUpdate({ latest: result.latest, url: result.url, notes: result.notes });
+          setLauncherProgress(null);
+        } else if (result.status === "restarting") {
+          setLauncherProgress({
+            phase: "restarting",
+            received: 1,
+            total: 1,
+            percent: 100,
+            message: result.message || `Restarting into ${result.latest}.`,
+          });
+        }
+      }).catch((err: unknown) => {
+        if (!stopped) {
+          setLauncherProgress(null);
+          setUpdateError(err instanceof Error ? err.message : String(err));
+        }
+      });
     }
-    return () => unlisten();
+    return () => {
+      stopped = true;
+      unlistenPatch();
+      unlistenUpdate();
+    };
     // beginPatch is stable enough for startup; including it retriggers the check.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot, refreshStatus]);
@@ -316,13 +353,28 @@ export default function App() {
       </aside>
 
       <main className="center">
-        {launcherUpdate && (
+        {(launcherProgress || launcherUpdate) && (
           <div className="update-banner">
-            <span>Launcher {launcherUpdate.latest} is available.</span>
-            {launcherUpdate.url && (
+            <span>
+              {launcherProgress?.message
+                || (launcherUpdate ? `Launcher ${launcherUpdate.latest} is available.` : "")}
+            </span>
+            {launcherProgress && launcherProgress.total > 0 && <span>{launcherProgress.percent}%</span>}
+            {!launcherProgress && launcherUpdate?.url && (
               <button type="button" onClick={() => void api.openUrl(launcherUpdate.url)}>
                 View release
               </button>
+            )}
+            {launcherProgress && (
+              <div
+                className={launcherProgress.total > 0 ? "bar" : "bar indeterminate"}
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={launcherProgress.percent}
+              >
+                <span style={{ width: launcherProgress.total > 0 ? `${launcherProgress.percent}%` : undefined }} />
+              </div>
             )}
           </div>
         )}
@@ -434,6 +486,19 @@ export default function App() {
       />
       <AdminDialog open={adminOpen} boot={boot} onOpenChange={setAdminOpen} />
       <MarkdownDialog open={notesOpen} onOpenChange={setNotesOpen} title={notesTitle} body={status?.patchNotes ?? ""} />
+      <Dialog.Root open={updateError.length > 0} onOpenChange={(open) => { if (!open) setUpdateError(""); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="overlay" />
+          <Dialog.Content className="dialog">
+            <Dialog.Title asChild><h2>Launcher update failed</h2></Dialog.Title>
+            <Dialog.Description className="error-line">{updateError}</Dialog.Description>
+            <p>You are still running this version. Settings and the server list were not changed.</p>
+            <div className="dialog-actions">
+              <Dialog.Close className="btn">Close</Dialog.Close>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       <Dialog.Root open={newsOpen} onOpenChange={setNewsOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="overlay" />
@@ -808,15 +873,17 @@ function SettingsDialog({
             <span>Launcher update repository</span>
             <input
               value={draft.launcherUpdateOwner}
-              placeholder="GitHub owner"
+              placeholder="uXa-Sloppy"
               onChange={(event) => setDraft({ ...draft, launcherUpdateOwner: event.target.value })}
             />
             <input
               value={draft.launcherUpdateRepo}
-              placeholder="GitHub repo"
+              placeholder="uXa-Launcher"
               onChange={(event) => setDraft({ ...draft, launcherUpdateRepo: event.target.value })}
             />
-            <small>Optional. A newer release is reported here; the launcher does not install it.</small>
+            <small>
+              Optional override. Leave both blank to use uXa-Sloppy/uXa-Launcher. When update checks are on, a newer Windows release is downloaded, checked, and this launcher restarts into it.
+            </small>
           </label>
           <div className="admin-key">
             <label className="field">
