@@ -31,7 +31,7 @@ Out of scope: an intro video, accounts, and login. This repo does not modify Fri
 
 The launcher does not copy files onto the game machine itself. A small **uXa Server Agent** runs on that machine (for Dolmar, `71.71.45.128`) and the launcher sends it signed requests.
 
-The agent listens on its own port (default `8787`) and does four things when asked to deploy:
+The agent listens on its own port (default `8788`) and does four things when asked to deploy:
 
 1. Download the zip whose name contains `Server` and `Win64` from the selected GitHub release of `uXa-Sloppy/FridayNightFights`.
 2. Warn the running `FridayNightFightsServer` on stdin (`say`, then `quit`), then copy `Saved` to a timestamped backup.
