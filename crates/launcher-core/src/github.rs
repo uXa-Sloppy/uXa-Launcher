@@ -86,14 +86,18 @@ pub fn http_client() -> Result<reqwest::Client> {
 fn headers(token: Option<&str>, accept: &str) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static(UA));
-    headers.insert(ACCEPT, HeaderValue::from_str(accept).map_err(|e| Error::msg(e.to_string()))?);
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_str(accept).map_err(|e| Error::msg(e.to_string()))?,
+    );
     headers.insert(
         "X-GitHub-Api-Version",
         HeaderValue::from_static("2022-11-28"),
     );
     if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
-        let value = HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| Error::msg("GitHub token contains characters that are not allowed in a header"))?;
+        let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            Error::msg("GitHub token contains characters that are not allowed in a header")
+        })?;
         headers.insert(AUTHORIZATION, value);
     }
     Ok(headers)
@@ -104,7 +108,11 @@ pub(crate) fn auth_headers(token: Option<&str>, accept: &str) -> Result<HeaderMa
 }
 
 fn friendly_status(status: StatusCode, body: &str) -> String {
-    let detail = body.chars().take(180).collect::<String>().replace('\n', " ");
+    let detail = body
+        .chars()
+        .take(180)
+        .collect::<String>()
+        .replace('\n', " ");
     match status.as_u16() {
         401 | 403 => {
             "GitHub refused the request. If the repository is private, add a personal access token with contents access in Settings.".into()
@@ -238,7 +246,8 @@ pub async fn find_release_by_tag(
         })
 }
 
-/// Launcher self-update check. Empty owner/repo yields `Ok(None)` so v0.1 can ship before its own feed exists.
+/// Report-only launcher check. Empty owner/repo yields `Ok(None)`.
+/// Installing the update is `crate::download_launcher_update`.
 pub async fn check_self_update(
     client: &reqwest::Client,
     api_base: &str,
@@ -280,6 +289,137 @@ pub async fn check_self_update(
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoVisibility {
+    Public,
+    Private,
+    /// Anonymous lookup was 404, and a saved token did not reveal the repo either.
+    NotVisible,
+}
+
+#[derive(Debug, Clone)]
+pub struct FullRelease {
+    pub tag: String,
+    pub name: String,
+    pub body: String,
+    pub html_url: String,
+    pub draft: bool,
+    pub prerelease: bool,
+    pub assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRepo {
+    private: bool,
+}
+
+fn asset_from_gh(asset: GhAsset) -> ReleaseAsset {
+    ReleaseAsset {
+        name: asset.name,
+        api_url: asset.url,
+        browser_download_url: asset.browser_download_url,
+        size: asset.size,
+        digest: asset.digest.filter(|d| !d.is_empty()),
+    }
+}
+
+/// Whether the launcher repo is public. A saved token is used only to tell a
+/// private repo from a missing one. The token is never written to logs.
+pub async fn repo_visibility(
+    client: &reqwest::Client,
+    api_base: &str,
+    owner: &str,
+    repo: &str,
+    saved_token: Option<&str>,
+) -> Result<RepoVisibility> {
+    let url = format!(
+        "{}/repos/{}/{}",
+        api_base.trim_end_matches('/'),
+        owner.trim(),
+        repo.trim()
+    );
+    match repo_private_flag(client, &url, None).await? {
+        Some(false) => return Ok(RepoVisibility::Public),
+        Some(true) => return Ok(RepoVisibility::Private),
+        None => {}
+    }
+    let Some(token) = saved_token.map(str::trim).filter(|token| !token.is_empty()) else {
+        return Ok(RepoVisibility::NotVisible);
+    };
+    match repo_private_flag(client, &url, Some(token)).await? {
+        Some(false) => Ok(RepoVisibility::Public),
+        Some(true) => Ok(RepoVisibility::Private),
+        None => Ok(RepoVisibility::NotVisible),
+    }
+}
+
+async fn repo_private_flag(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> Result<Option<bool>> {
+    let response = client
+        .get(url)
+        .headers(headers(token, "application/vnd.github+json")?)
+        .send()
+        .await?;
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    let text = response.text().await?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        if token.is_some() {
+            return Err(Error::msg(friendly_status(status, &text)));
+        }
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(Error::msg(friendly_status(status, &text)));
+    }
+    let repo: GhRepo = serde_json::from_str(&text)?;
+    Ok(Some(repo.private))
+}
+
+/// Latest non-draft GitHub release, including every asset. `Ok(None)` on 404.
+pub async fn fetch_latest_release(
+    client: &reqwest::Client,
+    api_base: &str,
+    owner: &str,
+    repo: &str,
+    token: Option<&str>,
+) -> Result<Option<FullRelease>> {
+    let url = format!(
+        "{}/repos/{}/{}/releases/latest",
+        api_base.trim_end_matches('/'),
+        owner.trim(),
+        repo.trim()
+    );
+    let response = client
+        .get(&url)
+        .headers(headers(token, "application/vnd.github+json")?)
+        .send()
+        .await?;
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    let text = response.text().await?;
+    if !status.is_success() {
+        return Err(Error::msg(friendly_status(status, &text)));
+    }
+    let release: GhRelease = serde_json::from_str(&text)?;
+    Ok(Some(FullRelease {
+        tag: release.tag_name,
+        name: release.name.unwrap_or_default(),
+        body: release.body.unwrap_or_default(),
+        html_url: release.html_url.unwrap_or_default(),
+        draft: release.draft,
+        prerelease: release.prerelease,
+        assets: release.assets.into_iter().map(asset_from_gh).collect(),
+    }))
+}
+
 pub fn download_url(asset: &ReleaseAsset) -> Result<&str> {
     if !asset.api_url.trim().is_empty() {
         return Ok(asset.api_url.trim());
@@ -287,5 +427,8 @@ pub fn download_url(asset: &ReleaseAsset) -> Result<&str> {
     if !asset.browser_download_url.trim().is_empty() {
         return Ok(asset.browser_download_url.trim());
     }
-    Err(Error::msg(format!("asset {} has no download URL", asset.name)))
+    Err(Error::msg(format!(
+        "asset {} has no download URL",
+        asset.name
+    )))
 }

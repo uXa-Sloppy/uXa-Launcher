@@ -20,6 +20,10 @@ if (-not $installer) {
     throw "NSIS installer was not produced."
 }
 Write-Host "Installer: $($installer.FullName)"
+$launcher = Get-ChildItem -Path "target\release\uxa-launcher.exe","src-tauri\target\release\uxa-launcher.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($launcher) {
+    Write-Host "Launcher exe: $($launcher.FullName)"
+}
 $agent = Join-Path (Get-Location) "target\release\uxa-server-agent.exe"
 if (Test-Path $agent) {
     Write-Host "Server agent: $agent"

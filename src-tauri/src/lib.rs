@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use launcher_core::{
-    agent_exchange, check_self_update, http_client, inspect_game as inspect_release, load_catalog,
-    load_news, load_servers, load_settings, patch_game, prepare_client_launch, probe_tcp,
-    read_manifest, resolve_install_dir, save_settings as write_settings, spawn_process,
-    write_manifest, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus, Catalog, GameDef,
-    GameSource, GameStatus, InspectRequest, NewsItem, PatchJob, PatchProgress, ReleaseSource,
-    ServerEntry, ServerMap, Settings,
+    agent_exchange, cleanup_previous_launcher, download_launcher_update, http_client,
+    inspect_game as inspect_release, load_catalog, load_news, load_servers, load_settings,
+    patch_game, prepare_client_launch, probe_tcp, read_manifest, replace_executable,
+    resolve_install_dir, resolve_update_repo, restore_previous_launcher, running_from_cargo_target,
+    save_settings as write_settings, spawn_process, verify_exe_file, write_manifest, AgentAction,
+    AgentLogLine, AgentReleaseSummary, AgentStatus, Catalog, GameDef, GameSource, GameStatus,
+    InspectRequest, LauncherUpdateFetch, NewsItem, PatchJob, PatchProgress, PreparedLauncherUpdate,
+    ReleaseSource, ServerEntry, ServerMap, Settings, LAUNCHER_EXE_ASSET,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -71,6 +73,26 @@ struct PatchEvent {
     received: u64,
     total: u64,
     percent: u8,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherUpdateEvent {
+    phase: String,
+    received: u64,
+    total: u64,
+    percent: u8,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherUpdateOutcome {
+    status: String,
+    latest: String,
+    url: String,
+    notes: String,
     message: String,
 }
 
@@ -216,7 +238,8 @@ fn write_token_file(data_dir: &Path, token: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| err.to_string())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -309,28 +332,31 @@ fn apply_agent_override(mut servers: Vec<ServerEntry>) -> Vec<ServerEntry> {
 }
 
 fn update_repo(settings: &Settings, catalog: &Catalog) -> (String, String) {
-    let owner = if settings.launcher_update_owner.trim().is_empty() {
-        catalog.launcher.update_owner.clone()
-    } else {
-        settings.launcher_update_owner.clone()
-    };
-    let repo = if settings.launcher_update_repo.trim().is_empty() {
-        catalog.launcher.update_repo.clone()
-    } else {
-        settings.launcher_update_repo.clone()
-    };
-    (owner, repo)
+    resolve_update_repo(
+        &settings.launcher_update_owner,
+        &settings.launcher_update_repo,
+        &catalog.launcher.update_owner,
+        &catalog.launcher.update_repo,
+    )
 }
 
-async fn news_items(state: &AppState, settings: &Settings, catalog: &Catalog) -> Result<Vec<NewsItem>, String> {
+async fn news_items(
+    state: &AppState,
+    settings: &Settings,
+    catalog: &Catalog,
+) -> Result<Vec<NewsItem>, String> {
     let configured = if !settings.news_url.trim().is_empty() {
         settings.news_url.trim().to_string()
     } else {
         catalog.news_url.trim().to_string()
     };
     if configured.is_empty() {
-        return load_news(&read_override(&state.paths.data_dir, "news.json", NEWS_JSON)?)
-            .map_err(|err| format!("news.json: {err}"));
+        return load_news(&read_override(
+            &state.paths.data_dir,
+            "news.json",
+            NEWS_JSON,
+        )?)
+        .map_err(|err| format!("news.json: {err}"));
     }
     let response = state
         .client
@@ -339,7 +365,10 @@ async fn news_items(state: &AppState, settings: &Settings, catalog: &Catalog) ->
         .await
         .map_err(|err| format!("News feed: {err}"))?;
     let status = response.status();
-    let text = response.text().await.map_err(|err| format!("News feed: {err}"))?;
+    let text = response
+        .text()
+        .await
+        .map_err(|err| format!("News feed: {err}"))?;
     if !status.is_success() {
         return Err(format!("News feed returned {status}"));
     }
@@ -384,7 +413,11 @@ fn source_for(game: &GameDef, token: Option<String>) -> Result<ReleaseSource, St
 #[tauri::command]
 async fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     let (catalog, servers) = load_library(&state.paths)?;
-    let settings = state.settings.lock().map_err(|err| err.to_string())?.clone();
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
     let news = match news_items(&state, &settings, &catalog).await {
         Ok(items) => items,
         Err(err) => {
@@ -416,7 +449,8 @@ async fn inspect_game(
 ) -> Result<GameStatus, String> {
     let (catalog, _) = load_library(&state.paths)?;
     let game = find_game(&catalog, &game_id)?.clone();
-    let manifest = read_manifest(&manifest_file(&state.paths, &game_id)).map_err(|err| err.to_string())?;
+    let manifest =
+        read_manifest(&manifest_file(&state.paths, &game_id)).map_err(|err| err.to_string())?;
     let token = load_token(&state.paths.data_dir);
     let status = inspect_release(InspectRequest {
         client: &state.client,
@@ -442,7 +476,11 @@ async fn inspect_game(
 }
 
 #[tauri::command]
-async fn start_patch(app: AppHandle, state: State<'_, AppState>, game_id: String) -> Result<GameStatus, String> {
+async fn start_patch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    game_id: String,
+) -> Result<GameStatus, String> {
     {
         let mut set = state.patching.lock().map_err(|err| err.to_string())?;
         if !set.insert(game_id.clone()) {
@@ -456,10 +494,18 @@ async fn start_patch(app: AppHandle, state: State<'_, AppState>, game_id: String
     result
 }
 
-async fn patch_inner(app: &AppHandle, state: &AppState, game_id: &str) -> Result<GameStatus, String> {
+async fn patch_inner(
+    app: &AppHandle,
+    state: &AppState,
+    game_id: &str,
+) -> Result<GameStatus, String> {
     let (catalog, _) = load_library(&state.paths)?;
     let game = find_game(&catalog, game_id)?.clone();
-    let settings = state.settings.lock().map_err(|err| err.to_string())?.clone();
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
     let install_dir = resolve_install_dir(&settings, &state.paths.default_install_root, &game)
         .map_err(|err| err.to_string())?;
     let token = load_token(&state.paths.data_dir);
@@ -501,7 +547,8 @@ async fn patch_inner(app: &AppHandle, state: &AppState, game_id: &str) -> Result
             return Err(message);
         }
     };
-    write_manifest(&manifest_file(&state.paths, game_id), &manifest).map_err(|err| err.to_string())?;
+    write_manifest(&manifest_file(&state.paths, game_id), &manifest)
+        .map_err(|err| err.to_string())?;
     tracing::info!(game = %game_id, version = %manifest.version, "patch finished");
     let token = load_token(&state.paths.data_dir);
     match inspect_release(InspectRequest {
@@ -549,7 +596,11 @@ async fn play(
             opened_url: Some(url.clone()),
         });
     }
-    let settings = state.settings.lock().map_err(|err| err.to_string())?.clone();
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
     let install_dir = resolve_install_dir(&settings, &state.paths.default_install_root, game)
         .map_err(|err| err.to_string())?;
     let list = servers.get(&game.servers_key).cloned().unwrap_or_default();
@@ -646,25 +697,200 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn check_launcher_update(state: State<'_, AppState>) -> Result<Option<launcher_core::CheckUpdate>, String> {
+async fn apply_launcher_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<LauncherUpdateOutcome, String> {
     let (catalog, _) = load_library(&state.paths)?;
-    let settings = state.settings.lock().map_err(|err| err.to_string())?.clone();
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
+    if !settings.check_on_start {
+        return Ok(outcome("current", "", "", "", ""));
+    }
     let (owner, repo) = update_repo(&settings, &catalog);
     let token = load_token(&state.paths.data_dir);
-    let update = check_self_update(
+    let download_dir = state.paths.download_dir.join("launcher-update");
+    let app_progress = app.clone();
+    let fetched = download_launcher_update(
         &state.client,
         &api_base(),
         &owner,
         &repo,
-        &catalog.launcher.version,
+        env!("CARGO_PKG_VERSION"),
         token.as_deref(),
+        &download_dir,
+        |progress| {
+            let _ = app_progress.emit(
+                "launcher-update",
+                LauncherUpdateEvent {
+                    phase: progress.phase,
+                    received: progress.received,
+                    total: progress.total,
+                    percent: progress.percent,
+                    message: progress.message,
+                },
+            );
+        },
     )
     .await
     .map_err(|err| err.to_string())?;
-    if let Some(update) = &update {
-        tracing::info!(latest = %update.latest, "launcher update available");
+    match fetched {
+        LauncherUpdateFetch::UpToDate => Ok(outcome("current", "", "", "", "")),
+        LauncherUpdateFetch::Skipped(message) => {
+            tracing::info!("launcher update skipped: {message}");
+            Ok(outcome("current", "", "", "", ""))
+        }
+        LauncherUpdateFetch::Ready(prepared) => install_or_announce(&app, prepared),
     }
-    Ok(update)
+}
+
+fn outcome(
+    status: &str,
+    latest: &str,
+    url: &str,
+    notes: &str,
+    message: &str,
+) -> LauncherUpdateOutcome {
+    LauncherUpdateOutcome {
+        status: status.to_string(),
+        latest: latest.to_string(),
+        url: url.to_string(),
+        notes: notes.to_string(),
+        message: message.to_string(),
+    }
+}
+
+fn install_or_announce(
+    app: &AppHandle,
+    prepared: PreparedLauncherUpdate,
+) -> Result<LauncherUpdateOutcome, String> {
+    let current = std::env::current_exe().map_err(|err| {
+        format!(
+            "Could not find the running launcher ({err}). The installed launcher was not changed."
+        )
+    })?;
+    if !should_replace_running_exe(&current) {
+        let message = if running_from_cargo_target(&current) {
+            format!(
+                "Launcher {} is available. This copy was started from a build folder, so it was not replaced.",
+                prepared.latest
+            )
+        } else {
+            format!(
+                "Launcher {} is available. It installs into %LOCALAPPDATA%\\uXa Launcher\\{} on Windows.",
+                prepared.latest, LAUNCHER_EXE_ASSET
+            )
+        };
+        tracing::info!("{message}");
+        return Ok(outcome(
+            "available",
+            &prepared.latest,
+            &prepared.url,
+            &prepared.notes,
+            &message,
+        ));
+    }
+
+    let _ = app.emit(
+        "launcher-update",
+        LauncherUpdateEvent {
+            phase: "installing".into(),
+            received: prepared.size,
+            total: prepared.size,
+            percent: 100,
+            message: format!("Installing launcher {}", prepared.latest),
+        },
+    );
+    replace_executable(&current, &prepared.exe_path).map_err(|err| err.to_string())?;
+    if let Err(err) = verify_exe_file(&current, prepared.size, prepared.sha256.as_deref()) {
+        return Err(restore_after(err.to_string(), &current));
+    }
+    if let Err(err) = relaunch_launcher(&current) {
+        return Err(restore_after(err, &current));
+    }
+    let message = format!("Restarting into launcher {}.", prepared.latest);
+    let _ = app.emit(
+        "launcher-update",
+        LauncherUpdateEvent {
+            phase: "restarting".into(),
+            received: prepared.size,
+            total: prepared.size,
+            percent: 100,
+            message: message.clone(),
+        },
+    );
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        handle.exit(0);
+    });
+    Ok(outcome(
+        "restarting",
+        &prepared.latest,
+        &prepared.url,
+        &prepared.notes,
+        &message,
+    ))
+}
+
+fn restore_after(err: String, current: &std::path::Path) -> String {
+    match restore_previous_launcher(current) {
+        Ok(()) => format!("{err} The previous version was restored."),
+        Err(restore_err) => {
+            format!("{err} Restoring the previous launcher also failed ({restore_err}).")
+        }
+    }
+}
+
+fn should_replace_running_exe(exe: &std::path::Path) -> bool {
+    if running_from_cargo_target(exe) {
+        return false;
+    }
+    let Some(name) = exe.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case(LAUNCHER_EXE_ASSET) {
+        return false;
+    }
+    cfg!(windows)
+}
+
+fn relaunch_launcher(exe: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+        let spawn = |flags: u32| {
+            let mut command = std::process::Command::new(exe);
+            if let Some(dir) = exe.parent() {
+                command.current_dir(dir);
+            }
+            command.creation_flags(flags).spawn()
+        };
+        if let Ok(child) =
+            spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
+        {
+            std::mem::forget(child);
+            return Ok(());
+        }
+        match spawn(CREATE_NEW_PROCESS_GROUP) {
+            Ok(child) => {
+                std::mem::forget(child);
+                Ok(())
+            }
+            Err(err) => Err(format!("Could not start the updated launcher ({err}).")),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = exe;
+        Err("Launcher self-update replaces the Windows executable. The installed launcher was not changed.".into())
+    }
 }
 
 fn agent_secret_path(data_dir: &Path) -> PathBuf {
@@ -728,7 +954,8 @@ fn write_agent_secret_file(data_dir: &Path, secret: &str) -> Result<(), String> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| err.to_string())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -779,7 +1006,12 @@ fn remember_agent_secret(state: &AppState, secret: &str) {
 }
 
 fn current_agent_secret(state: &AppState) -> Result<String, String> {
-    if let Some(secret) = state.agent_secret.lock().map_err(|err| err.to_string())?.clone() {
+    if let Some(secret) = state
+        .agent_secret
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone()
+    {
         return Ok(secret);
     }
     if let Some(secret) = load_agent_secret(&state.paths.data_dir) {
@@ -910,7 +1142,10 @@ async fn admin_logs(
     )
     .await?;
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
-    let lines = parsed.get("lines").cloned().unwrap_or(serde_json::Value::Null);
+    let lines = parsed
+        .get("lines")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     serde_json::from_value(lines).map_err(|err| err.to_string())
 }
 
@@ -920,14 +1155,18 @@ async fn admin_deploy(
     server_id: String,
     tag: String,
 ) -> Result<AgentAction, String> {
-    let payload = serde_json::to_vec(&serde_json::json!({ "tag": tag })).map_err(|err| err.to_string())?;
+    let payload =
+        serde_json::to_vec(&serde_json::json!({ "tag": tag })).map_err(|err| err.to_string())?;
     tracing::info!(server = %server_id, %tag, "admin deploy");
     let body = agent_call(&state, &server_id, "POST", "/v1/deploy", &payload).await?;
     serde_json::from_str(&body).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn admin_restart(state: State<'_, AppState>, server_id: String) -> Result<AgentAction, String> {
+async fn admin_restart(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<AgentAction, String> {
     tracing::info!(server = %server_id, "admin restart");
     let body = agent_call(&state, &server_id, "POST", "/v1/restart", b"").await?;
     serde_json::from_str(&body).map_err(|err| err.to_string())
@@ -943,7 +1182,11 @@ async fn admin_stop(state: State<'_, AppState>, server_id: String) -> Result<Age
 #[tauri::command]
 async fn refresh_news(state: State<'_, AppState>) -> Result<Vec<NewsItem>, String> {
     let (catalog, _) = load_library(&state.paths)?;
-    let settings = state.settings.lock().map_err(|err| err.to_string())?.clone();
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
     news_items(&state, &settings, &catalog).await
 }
 
@@ -955,6 +1198,9 @@ pub fn run() {
     let _ = fs::create_dir_all(&paths.manifest_dir);
     let _ = fs::create_dir_all(&paths.download_dir);
     init_logging(&paths.log_dir);
+    if let Ok(exe) = std::env::current_exe() {
+        cleanup_previous_launcher(&exe);
+    }
     let settings = load_settings(&paths.data_dir.join("settings.json")).unwrap_or_else(|err| {
         tracing::error!("settings.json could not be read ({err}); using defaults");
         Settings::default()
@@ -986,7 +1232,7 @@ pub fn run() {
             probe_server,
             open_logs,
             open_url,
-            check_launcher_update,
+            apply_launcher_update,
             refresh_news,
             unlock_admin,
             admin_probe,

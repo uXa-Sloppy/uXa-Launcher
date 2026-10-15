@@ -1,6 +1,6 @@
 # uXa Launcher
 
-Desktop launcher for the uXa gaming guild, version **0.2.0**. It installs and patches Windows games, keeps player saves across updates, and opens browser games. Admins can also deploy the Friday Night Fights dedicated server. Launcher versions are not game versions.
+Desktop launcher for the uXa gaming guild, version **0.3.0**. It installs and patches Windows games, keeps player saves across updates, and opens browser games. Admins can also deploy the Friday Night Fights dedicated server. Launcher versions are not game versions.
 
 ![Friday Night Fights ready to play](docs/screenshots/friday-night-fights.png)
 
@@ -21,7 +21,7 @@ Desktop launcher for the uXa gaming guild, version **0.2.0**. It installs and pa
 - **Grave March** opens `https://www.undeadlegion.pro/grave-march-unity/` in the default browser. The version line is read from that page (`Build 72, last updated Oct 13, 2026`). If the page cannot be read, Play still works.
 - **Patch notes** render the GitHub release body (or Grave March's build line). **Guild news** loads a `news.json` URL from Settings, and falls back to the bundled feed.
 - **Settings** cover the games folder, a per-game install path, an optional GitHub token, update checks on startup, the news URL, and the launcher's own update repository. On Windows the token is stored in Credential Manager; otherwise it is a user-only file. It is never written into `settings.json`.
-- **Launcher updates** are a v0.1 stub: if an owner/repo is set, a newer GitHub release is announced. The launcher does not install that update itself.
+- **Launcher updates.** With **Check for updates on start** on, startup looks at the latest GitHub release of `uXa-Sloppy/uXa-Launcher` (Settings can override the owner and repo). A newer release downloads `uxa-launcher.exe`, checks its size and the `SHA256SUMS.txt` entry, then on Windows renames the running exe to `uxa-launcher.exe.old`, puts the new file in its place, and restarts. The next start deletes the `.old` file. Settings stay in `%LOCALAPPDATA%\uXa\Launcher` (including a `servers.json` override). If the download, checksum, or swap fails, the previous exe is left running. A saved GitHub token is sent only when that repository is private, and it is never written to the log.
 - **Logs** go to `%LOCALAPPDATA%\uXa\Launcher\logs` on Windows (`~/.local/share/uXa/Launcher/logs` on Linux).
 - **Admin** is hidden until an admin key is accepted by a server agent. From there an admin can deploy a dedicated-server build, restart it, or stop it. The key is never written into `settings.json`.
 
@@ -124,7 +124,7 @@ Install from the launcher, put a file in `Saved/SaveGames`, change the tag in `.
 
 ## Windows build
 
-The installer is an NSIS setup (current user, no admin). It bootstraps WebView2 if Windows does not already have it.
+The installer is an NSIS setup (current user, no admin). It installs to `%LOCALAPPDATA%\uXa Launcher\uxa-launcher.exe` and bootstraps WebView2 if Windows does not already have it.
 
 On a Windows machine, from this directory:
 
@@ -136,7 +136,7 @@ The setup executable is written to `src-tauri\target\release\bundle\nsis\`.
 
 You need Node.js 22+, Rust stable, and the Visual Studio C++ build tools. WebView2 is already present on current Windows 11 images and on GitHub-hosted runners.
 
-Pushing `main` also runs `.github/workflows/windows-build.yml`, which tests the patcher and uploads the NSIS installer as the `uxa-launcher-windows` artifact. `scripts/build-windows.sh` runs the same tests on Linux and prints these steps; it does not cross-compile the installer.
+Pushing `main`, pushing a `v*` tag, or running the workflow by hand runs `.github/workflows/windows-build.yml`. It uses Rust **1.99.0** and uploads `uxa-launcher.exe`, the NSIS installer, and `SHA256SUMS.txt` as the `uxa-launcher-windows` artifact. A version tag or a manual run also attaches those files to a GitHub Release. `scripts/build-windows.sh` runs the same tests on Linux and prints these steps; it does not cross-compile the installer.
 
 ## Tests
 
