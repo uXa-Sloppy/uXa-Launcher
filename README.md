@@ -1,6 +1,6 @@
 # uXa Launcher
 
-Desktop launcher for the uXa gaming guild, version **0.3.0**. It installs and patches Windows games, keeps player saves across updates, and opens browser games. Admins can also deploy the Friday Night Fights dedicated server. Launcher versions are not game versions.
+Desktop launcher for the uXa gaming guild, version **0.3.1**. It installs and patches Windows games, keeps player saves across updates, and opens browser games. Admins can also deploy the Friday Night Fights dedicated server. Launcher versions are not game versions.
 
 ![Friday Night Fights ready to play](docs/screenshots/friday-night-fights.png)
 
@@ -26,6 +26,27 @@ Desktop launcher for the uXa gaming guild, version **0.3.0**. It installs and pa
 - **Admin** is hidden until an admin key is accepted by a server agent. From there an admin can deploy a dedicated-server build, restart it, or stop it. The key is never written into `settings.json`.
 
 Out of scope: an intro video, accounts, and login. This repo does not modify Friday Night Fights.
+
+## Command line
+
+The same `uxa-launcher.exe` accepts commands so a shell can deploy and patch without opening the window. On Windows the installed copy is `%LOCALAPPDATA%\uXa Launcher\uxa-launcher.exe`. These commands still run when the window is already open. They print plain progress to the console and return exit code 0 on success. A failure returns 1. An unknown flag returns 2.
+
+```powershell
+& "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --status
+& "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --update-client
+& "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --deploy-server v1.2.0
+& "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --version
+& "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --help
+```
+
+- `--status` prints the launcher version, the installed Friday Night Fights client version, and the selected server's version and whether it is online.
+- `--update-client` downloads and installs the latest Friday Night Fights client patch, the same way Play's patch step does, and does not start the game. It prints the installed version.
+- `--deploy-server <version>` deploys that server release tag to the selected server (Dolmar's Server unless Settings names another) through the uXa Server Agent. It waits until the agent finishes, then prints the agent's result and the running version.
+- With no flags, the launcher window opens.
+
+The server list is `config/servers.json`, or `%LOCALAPPDATA%\uXa\Launcher\servers.json` when that file is present (the same override the window uses, including a Cloudflare tunnel `agentUrl`). Deploy and status use the admin key already saved by unlocking admin in the window. They never print, log, or rewrite that key, a GitHub token, or `settings.json`. If the key is not saved yet, the command stops and asks you to unlock admin once in the window.
+
+Installing 0.3.1 over an older copy, or letting the launcher replace its own exe, updates `%LOCALAPPDATA%\uXa Launcher\uxa-launcher.exe` only. Settings, `servers.json`, the admin key, and the GitHub token stay in `%LOCALAPPDATA%\uXa\Launcher`.
 
 ## Server admin
 
@@ -151,6 +172,8 @@ Pushing `main`, pushing a `v*` tag, or running the workflow by hand runs `.githu
 - `Config/Servers.ini` format and `FridayNightFights.exe host:port`
 - Grave March's build line, including a dead page that still allows play
 - a private-repo 404 that leaves an installed game playable
+- `--status`, `--update-client`, and `--deploy-server` leave `settings.json`, `servers.json`, the admin key, and the GitHub token byte-for-byte unchanged
+- a launcher self-update, and a second install over the top of that exe, leave those same files unchanged
 
 The server-agent test deploys a mock `Server` + `Win64` zip, keeps `Saved` and `Config`, records the warning and `quit`, rejects a bad signature, rolls back a build that exits immediately, then restarts and stops the restored process. A config file that contains a secret is refused.
 

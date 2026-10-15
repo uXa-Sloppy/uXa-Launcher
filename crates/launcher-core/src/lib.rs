@@ -3,6 +3,7 @@
 //! the install path can be tested without a window.
 
 mod agent;
+mod cli;
 mod error;
 mod github;
 mod inspect;
@@ -15,6 +16,10 @@ mod version;
 mod web;
 
 pub use agent::{agent_exchange, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus};
+pub use cli::{
+    execute_cli, help_text, parse_cli, redact_cli, CliCommand, CliInput, CliReport, EXIT_FAILURE,
+    EXIT_OK, EXIT_USAGE, MISSING_ADMIN_KEY,
+};
 pub use error::{Error, Result};
 pub use github::{
     check_self_update, download_url, fetch_latest_release, find_release_by_tag, http_client,
@@ -48,5 +53,5 @@ pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
 pub use version::{is_newer, parse_version};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
-pub const USER_AGENT: &str = "uXa-Launcher/0.3";
+pub const USER_AGENT: &str = "uXa-Launcher/0.3.1";
 pub const DEFAULT_WEB_VERSION_PATTERN: &str = r"Build\s+(\d+)\s*,\s*last updated\s+([^<\r\n]+)";

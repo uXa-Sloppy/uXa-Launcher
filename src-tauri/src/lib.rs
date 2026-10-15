@@ -1,18 +1,21 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use launcher_core::{
     agent_exchange, cleanup_previous_launcher, download_launcher_update, http_client,
     inspect_game as inspect_release, load_catalog, load_news, load_servers, load_settings,
-    patch_game, prepare_client_launch, probe_tcp, read_manifest, replace_executable,
-    resolve_install_dir, resolve_update_repo, restore_previous_launcher, running_from_cargo_target,
-    save_settings as write_settings, spawn_process, verify_exe_file, write_manifest, AgentAction,
+    execute_cli, patch_game, prepare_client_launch, probe_tcp, read_manifest, redact_cli,
+    replace_executable, resolve_install_dir, resolve_update_repo, restore_previous_launcher,
+    running_from_cargo_target, save_settings as write_settings, spawn_process, verify_exe_file,
+    write_manifest, AgentAction, CliInput, EXIT_FAILURE,
     AgentLogLine, AgentReleaseSummary, AgentStatus, Catalog, GameDef, GameSource, GameStatus,
     InspectRequest, LauncherUpdateFetch, NewsItem, PatchJob, PatchProgress, PreparedLauncherUpdate,
     ReleaseSource, ServerEntry, ServerMap, Settings, LAUNCHER_EXE_ASSET,
 };
+pub use launcher_core::{parse_cli, CliCommand, EXIT_USAGE};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tracing_subscriber::prelude::*;
@@ -141,21 +144,28 @@ fn api_base() -> String {
         .unwrap_or_else(|| "https://api.github.com".into())
 }
 
-fn init_logging(log_dir: &Path) {
+fn init_logging(log_dir: &Path, console: bool) {
     let _ = fs::create_dir_all(log_dir);
     let appender = tracing_appender::rolling::daily(log_dir, "launcher.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(writer),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .try_init();
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(writer);
+    let started = if console {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(file_layer)
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(file_layer)
+            .try_init()
+    };
+    let _ = started;
     // The guard must live for the process or the log file is empty.
     std::mem::forget(guard);
 }
@@ -1197,7 +1207,7 @@ pub fn run() {
     let _ = fs::create_dir_all(&paths.log_dir);
     let _ = fs::create_dir_all(&paths.manifest_dir);
     let _ = fs::create_dir_all(&paths.download_dir);
-    init_logging(&paths.log_dir);
+    init_logging(&paths.log_dir, true);
     if let Ok(exe) = std::env::current_exe() {
         cleanup_previous_launcher(&exe);
     }
@@ -1245,4 +1255,73 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running uXa Launcher");
+}
+
+/// Run one CLI command and exit. Does not open a window, does not install a
+/// launcher update, and does not write the admin key or settings.
+pub fn run_headless(command: CliCommand) -> i32 {
+    let paths = app_paths();
+    let _ = fs::create_dir_all(&paths.data_dir);
+    let _ = fs::create_dir_all(&paths.log_dir);
+    let _ = fs::create_dir_all(&paths.manifest_dir);
+    let _ = fs::create_dir_all(&paths.download_dir);
+    init_logging(&paths.log_dir, false);
+    if let Ok(exe) = std::env::current_exe() {
+        cleanup_previous_launcher(&exe);
+    }
+    let games = match read_override(&paths.data_dir, "games.json", GAMES_JSON) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("{}", redact_cli(&err, &[]));
+            return EXIT_FAILURE;
+        }
+    };
+    let servers = match read_override(&paths.data_dir, "servers.json", SERVERS_JSON) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("{}", redact_cli(&err, &[]));
+            return EXIT_FAILURE;
+        }
+    };
+    let admin_key = load_agent_secret(&paths.data_dir);
+    let github_token = load_token(&paths.data_dir);
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(err) => {
+            let secrets = secret_refs(&admin_key, &github_token);
+            eprintln!("{}", redact_cli(&err.to_string(), &secrets));
+            return EXIT_FAILURE;
+        }
+    };
+    let api = api_base();
+    let agent_env = env_string("UXA_AGENT_URL");
+    let input = CliInput {
+        launcher_version: env!("CARGO_PKG_VERSION"),
+        data_dir: &paths.data_dir,
+        install_root: &paths.default_install_root,
+        games_json: &games,
+        servers_json: &servers,
+        api_base: &api,
+        agent_url_override: agent_env.as_deref(),
+        admin_key: admin_key.as_deref(),
+        github_token: github_token.as_deref(),
+    };
+    let report = tauri::async_runtime::block_on(execute_cli(&client, &input, command));
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    let _ = stdout.write_all(report.stdout.as_bytes());
+    let _ = stdout.flush();
+    let _ = stderr.write_all(report.stderr.as_bytes());
+    let _ = stderr.flush();
+    if report.exit_code != 0 && !report.stderr.is_empty() {
+        tracing::error!("{}", report.stderr.trim());
+    }
+    report.exit_code
+}
+
+fn secret_refs<'a>(admin_key: &'a Option<String>, github_token: &'a Option<String>) -> Vec<&'a str> {
+    [admin_key.as_deref(), github_token.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect()
 }

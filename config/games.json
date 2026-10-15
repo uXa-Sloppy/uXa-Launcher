@@ -1,8 +1,8 @@
 {
   "newsUrl": "",
   "launcher": {
-    "version": "0.3.0",
-    "displayVersion": "v0.3",
+    "version": "0.3.1",
+    "displayVersion": "v0.3.1",
     "updateOwner": "uXa-Sloppy",
     "updateRepo": "uXa-Launcher"
   },

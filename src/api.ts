@@ -149,8 +149,8 @@ const previewNotes = `## v0.9.5 – The Brawler's Update
 
 function previewBootstrap(): Bootstrap {
   return {
-    launcherVersion: "0.3.0",
-    displayVersion: "v0.3",
+    launcherVersion: "0.3.1",
+    displayVersion: "v0.3.1",
     defaultInstallRoot: "%LOCALAPPDATA%\\uXa\\Games",
     dataDir: "%LOCALAPPDATA%\\uXa\\Launcher",
     logDir: "%LOCALAPPDATA%\\uXa\\Launcher\\logs",
