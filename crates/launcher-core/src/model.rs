@@ -245,7 +245,7 @@ mod tests {
         let list = servers.get("friday-night-fights").unwrap();
         assert_eq!(list[0].host, "71.71.45.128");
         assert_eq!(list[0].port, 7777);
-        assert_eq!(list[0].agent_url, "https://71.71.45.128:8787");
+        assert_eq!(list[0].agent_url, "https://71.71.45.128:8788");
         assert!(list[1].agent_url.is_empty());
         let news = load_news(include_str!("../../../config/news.json")).unwrap();
         assert_eq!(news.len(), 2);
