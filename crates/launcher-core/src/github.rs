@@ -43,6 +43,17 @@ pub struct CheckUpdate {
     pub latest: String,
     pub url: String,
     pub notes: String,
+    /// The launcher .exe attached to the release, when there is one (enables in-place self-update).
+    pub asset: Option<LauncherAsset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherAsset {
+    pub name: String,
+    pub api_url: String,
+    pub size: u64,
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +288,7 @@ pub async fn check_self_update(
         latest: release.tag_name,
         url: release.html_url.unwrap_or_default(),
         notes: release.body.unwrap_or_default(),
+        asset: pick_launcher_asset(&release.assets),
     }))
 }
 
@@ -288,4 +300,76 @@ pub fn download_url(asset: &ReleaseAsset) -> Result<&str> {
         return Ok(asset.browser_download_url.trim());
     }
     Err(Error::msg(format!("asset {} has no download URL", asset.name)))
+}
+
+/// The launcher executable on a release: a `.exe` whose name contains "launcher" (not an installer or the agent).
+fn pick_launcher_asset(assets: &[GhAsset]) -> Option<LauncherAsset> {
+    assets
+        .iter()
+        .find(|a| {
+            let n = a.name.to_ascii_lowercase();
+            n.ends_with(".exe") && n.contains("launcher") && !n.contains("setup") && !n.contains("agent")
+        })
+        .map(|a| LauncherAsset {
+            name: a.name.clone(),
+            api_url: a.url.clone(),
+            size: a.size,
+            digest: a.digest.clone().filter(|d| !d.is_empty()),
+        })
+}
+
+/// Download a launcher asset with the existing read-only token, then verify size and sha256 digest.
+pub async fn download_launcher_asset(
+    client: &reqwest::Client,
+    asset: &LauncherAsset,
+    token: Option<&str>,
+    dest: &std::path::Path,
+) -> Result<()> {
+    let response = client
+        .get(&asset.api_url)
+        .headers(headers(token, "application/octet-stream")?)
+        .timeout(Duration::from_secs(600))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(Error::msg(friendly_status(status, &text)));
+    }
+    let bytes = response.bytes().await?;
+    if asset.size > 0 && bytes.len() as u64 != asset.size {
+        return Err(Error::msg(format!(
+            "launcher download is {} bytes, release says {}",
+            bytes.len(),
+            asset.size
+        )));
+    }
+    std::fs::write(dest, &bytes)?;
+    match &asset.digest {
+        Some(d) => {
+            if let Err(e) = crate::patch::check_digest(dest, d) {
+                let _ = std::fs::remove_file(dest);
+                return Err(e);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(dest);
+            return Err(Error::msg("release asset has no sha256 digest; refusing to self-update"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod launcher_asset_tests {
+    use super::*;
+    fn a(name: &str) -> GhAsset {
+        GhAsset { name: name.into(), url: "u".into(), browser_download_url: String::new(), size: 1, digest: None }
+    }
+    #[test]
+    fn picks_launcher_exe_only() {
+        let list = vec![a("uXa-Server-Agent.exe"), a("uXa-Launcher_setup.exe"), a("uXa-Launcher.exe"), a("game.zip")];
+        assert_eq!(pick_launcher_asset(&list).unwrap().name, "uXa-Launcher.exe");
+        assert!(pick_launcher_asset(&[a("game.zip")]).is_none());
+    }
 }

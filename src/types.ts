@@ -75,6 +75,7 @@ export interface LauncherUpdate {
   latest: string;
   url: string;
   notes: string;
+  asset?: { name: string; apiUrl: string; size: number; digest?: string } | null;
 }
 
 export interface PlayResult {

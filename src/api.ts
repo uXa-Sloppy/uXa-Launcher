@@ -29,6 +29,8 @@ export interface LauncherApi {
   clearToken(): Promise<void>;
   probe(host: string, port: number): Promise<string>;
   checkLauncherUpdate(): Promise<LauncherUpdate | null>;
+  worldStatus(serverId: string): Promise<{ state: string; message: string }>;
+  applyLauncherUpdate(): Promise<void>;
   openLogs(): Promise<void>;
   openUrl(url: string): Promise<void>;
   refreshNews(): Promise<NewsItem[]>;
@@ -58,6 +60,8 @@ const tauriApi: LauncherApi = {
   clearToken: () => invoke("clear_github_token"),
   probe: (host, port) => invoke<string>("probe_server", { host, port }),
   checkLauncherUpdate: () => invoke<LauncherUpdate | null>("check_launcher_update"),
+  worldStatus: (serverId) => invoke<{ state: string; message: string }>("world_status", { serverId }),
+  applyLauncherUpdate: () => invoke("apply_launcher_update"),
   openLogs: () => invoke("open_logs"),
   openUrl: (url) => invoke("open_url", { url }),
   refreshNews: () => invoke<NewsItem[]>("refresh_news"),
@@ -245,6 +249,10 @@ const previewApi: LauncherApi = {
   async checkLauncherUpdate() {
     return null;
   },
+  async worldStatus() {
+    return { state: "online", message: "Online" };
+  },
+  async applyLauncherUpdate() {},
   async openLogs() {},
   async openUrl(url: string) {
     window.open(url, "_blank", "noopener");

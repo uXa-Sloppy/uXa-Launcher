@@ -48,6 +48,8 @@ export default function App() {
   const [patchingId, setPatchingId] = useState<string | null>(null);
   const [serverId, setServerId] = useState("dolmar");
   const [probe, setProbe] = useState("unknown");
+  const [world, setWorld] = useState<{ state: string; message: string } | null>(null);
+  const [selfUpdating, setSelfUpdating] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [newsOpen, setNewsOpen] = useState(false);
@@ -171,6 +173,19 @@ export default function App() {
     });
     return () => {
       cancel = true;
+    };
+  }, [selectedServer, game?.kind]);
+
+  useEffect(() => {
+    if (!selectedServer || game?.kind === "web") return;
+    let cancel = false;
+    const poll = () =>
+      api.worldStatus(selectedServer.id).then((value) => !cancel && setWorld(value)).catch(() => !cancel && setWorld(null));
+    void poll();
+    const timer = window.setInterval(poll, 20000);
+    return () => {
+      cancel = true;
+      window.clearInterval(timer);
     };
   }, [selectedServer, game?.kind]);
 
@@ -318,12 +333,29 @@ export default function App() {
       <main className="center">
         {launcherUpdate && (
           <div className="update-banner">
-            <span>Launcher {launcherUpdate.latest} is available.</span>
+            <span>{selfUpdating ?? `Launcher ${launcherUpdate.latest} is available.`}</span>
+            {launcherUpdate.asset && (
+              <button
+                type="button"
+                disabled={!!selfUpdating}
+                onClick={() => {
+                  setSelfUpdating("Updating the launcher…");
+                  api.applyLauncherUpdate().catch((err) => setSelfUpdating(`Update failed: ${String(err)}`));
+                }}
+              >
+                Update now
+              </button>
+            )}
             {launcherUpdate.url && (
               <button type="button" onClick={() => void api.openUrl(launcherUpdate.url)}>
                 View release
               </button>
             )}
+          </div>
+        )}
+        {world && game.kind !== "web" && (
+          <div className={`world-status world-${world.state}`} role="status">
+            <span className="world-dot" /> {world.message}
           </div>
         )}
         <section className="hero" aria-label={`${game.name} banner`}>

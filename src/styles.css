@@ -548,3 +548,9 @@ button:disabled { cursor: default; }
   .hero { min-height: 200px; }
   .play { height: 64px; font-size: 28px; }
 }
+
+.world-status { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 10px; padding: 6px 12px; border-radius: 6px; background: rgba(0,0,0,.35); font-weight: 600; }
+.world-status .world-dot { width: 10px; height: 10px; border-radius: 50%; background: #888; }
+.world-online .world-dot { background: #4caf50; }
+.world-restarting .world-dot { background: #e0a030; }
+.world-update .world-dot, .world-offline .world-dot { background: #d04040; }

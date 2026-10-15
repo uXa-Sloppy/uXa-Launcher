@@ -205,7 +205,7 @@ pub fn verify_download(path: &Path, expected_size: u64, digest: Option<&str>) ->
     Ok(())
 }
 
-fn check_digest(path: &Path, digest: &str) -> Result<()> {
+pub(crate) fn check_digest(path: &Path, digest: &str) -> Result<()> {
     let hex_str = digest.strip_prefix("sha256:").unwrap_or(digest);
     if hex_str.len() != 64 || !hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(Error::msg(format!("unsupported digest format ({digest})")));

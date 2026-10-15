@@ -19,7 +19,7 @@ pub use agent::{
 pub use error::{Error, Result};
 pub use github::{
     check_self_update, download_url, find_release_by_tag, http_client, list_matching_releases,
-    CheckUpdate, ReleaseAsset, ReleaseInfo, ReleaseSource,
+    download_launcher_asset, CheckUpdate, LauncherAsset, ReleaseAsset, ReleaseInfo, ReleaseSource,
 };
 pub use inspect::{inspect_game, InspectRequest};
 pub use launch::{

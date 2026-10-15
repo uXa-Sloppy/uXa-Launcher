@@ -590,6 +590,34 @@ impl Agent {
         Ok(())
     }
 
+    /// Player-facing world status. The game server writes Saved/ServerStatus.json
+    /// ("online", "restarting" before a GM restart, "update" before a GM update shutdown).
+    pub async fn world(&self) -> serde_json::Value {
+        self.refresh_liveness().await;
+        // The game uses UDP, so the status file (rewritten by the server on start and before a GM
+        // restart/update) is the source of truth; agent child liveness covers a missing file.
+        let online = self.online.load(Ordering::Acquire);
+        let phase = self.phase.lock().map(|p| p.clone()).unwrap_or_default();
+        let file = world_status_file(&self.config.install_dir);
+        let (mut state, mut message) = if online {
+            ("online".to_string(), "Online".to_string())
+        } else {
+            ("offline".to_string(), "Offline".to_string())
+        };
+        if let Some(v) = file
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        {
+            state = v["state"].as_str().unwrap_or("online").to_string();
+            message = v["message"].as_str().unwrap_or("Online").to_string();
+        }
+        if phase.contains("deploy") {
+            state = "update".into();
+            message = "The world is down for an update".into();
+        }
+        serde_json::json!({ "state": state, "message": message, "online": online })
+    }
+
     async fn refresh_liveness(&self) {
         let mut guard = self.process.lock().await;
         if let Some(running) = guard.as_mut() {
@@ -753,4 +781,13 @@ where
             }
         }
     });
+}
+
+/// `<install>/<Project>/Saved/ServerStatus.json` (packaged UE layout), or `<install>/Saved/ServerStatus.json`.
+fn world_status_file(install_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let direct = install_dir.join("Saved").join("ServerStatus.json");
+    if direct.exists() {
+        return Some(direct);
+    }
+    std::fs::read_dir(install_dir).ok()?.flatten().map(|e| e.path().join("Saved").join("ServerStatus.json")).find(|p| p.exists())
 }

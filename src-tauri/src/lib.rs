@@ -645,6 +645,74 @@ fn open_url(url: String) -> Result<(), String> {
     open_http(&url)
 }
 
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorldStatus {
+    state: String,
+    message: String,
+}
+
+/// Launch-screen world status. Asks the server agent's public `/v1/world` (published by the game server);
+/// falls back to a TCP ping of the game port when there is no agent or it cannot be reached.
+#[tauri::command]
+async fn world_status(state: State<'_, AppState>, server_id: String) -> Result<WorldStatus, String> {
+    let (_, servers) = load_library(&state.paths)?;
+    let server = find_server_by_id(&servers, &server_id)?;
+    if let Ok(url) = resolve_agent_url(&server) {
+        let url = format!("{}/v1/world", url.trim_end_matches('/'));
+        if let Ok(resp) = state.client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                if let (Some(s), Some(m)) = (v["state"].as_str(), v["message"].as_str()) {
+                    return Ok(WorldStatus { state: s.into(), message: m.into() });
+                }
+            }
+        }
+    }
+    let ping = launcher_core::probe_tcp(&server.host, server.port).await;
+    Ok(match ping {
+        "online" => WorldStatus { state: "online".into(), message: "Online".into() },
+        _ => WorldStatus { state: "unknown".into(), message: "World status unavailable".into() },
+    })
+}
+
+/// Download the newer launcher .exe (existing read-only token from Credential Manager), verify size + sha256,
+/// rename the running exe to `.old`, move the new one into place and relaunch.
+#[tauri::command]
+async fn apply_launcher_update(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let (catalog, _) = load_library(&state.paths)?;
+    let settings = state.settings.lock().map_err(|err| err.to_string())?.clone();
+    let (owner, repo) = update_repo(&settings, &catalog);
+    let token = load_token(&state.paths.data_dir);
+    let update = check_self_update(&state.client, &api_base(), &owner, &repo, &catalog.launcher.version, token.as_deref())
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or("The launcher is already up to date.")?;
+    let asset = update.asset.ok_or("That release has no launcher .exe attached.")?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let new_path = exe.with_extension("new.exe");
+    let old_path = exe.with_extension("old.exe");
+    launcher_core::download_launcher_asset(&state.client, &asset, token.as_deref(), &new_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    let _ = std::fs::remove_file(&old_path);
+    std::fs::rename(&exe, &old_path).map_err(|e| format!("could not move the running launcher aside: {e}"))?;
+    if let Err(e) = std::fs::rename(&new_path, &exe) {
+        let _ = std::fs::rename(&old_path, &exe);
+        return Err(format!("could not install the new launcher: {e}"));
+    }
+    tracing::info!(latest = %update.latest, "launcher self-updated; relaunching");
+    app.restart();
+}
+
+/// Remove the previous launcher left behind by a self-update.
+fn cleanup_old_launcher() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("old.exe"));
+        let _ = std::fs::remove_file(exe.with_extension("new.exe"));
+    }
+}
+
 #[tauri::command]
 async fn check_launcher_update(state: State<'_, AppState>) -> Result<Option<launcher_core::CheckUpdate>, String> {
     let (catalog, _) = load_library(&state.paths)?;
@@ -966,6 +1034,7 @@ pub fn run() {
         games = %paths.default_install_root.display(),
         "uXa Launcher starting"
     );
+    cleanup_old_launcher();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
@@ -995,7 +1064,9 @@ pub fn run() {
             admin_logs,
             admin_deploy,
             admin_restart,
-            admin_stop
+            admin_stop,
+            world_status,
+            apply_launcher_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running uXa Launcher");

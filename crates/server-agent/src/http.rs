@@ -62,6 +62,10 @@ async fn dispatch(
     body: Bytes,
 ) -> Response {
     let path = uri.path();
+    // Public, unsigned, read-only: world status for the player launcher (no admin key involved).
+    if method.as_str() == "GET" && path == "/v1/world" {
+        return Json(agent.world().await).into_response();
+    }
     let timestamp = header(&headers, "x-uxa-timestamp");
     let signature = header(&headers, "x-uxa-signature");
     if let Err(err) = verify_request(
