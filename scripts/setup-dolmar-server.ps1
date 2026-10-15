@@ -16,7 +16,7 @@ param(
     [string]$Tag = "v0.9.5",
     [string]$Repo = "uXa-Sloppy/FridayNightFights",
     [int]$GamePort = 7777,
-    [int]$AgentPort = 8787,
+    [int]$AgentPort = 8788,
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
