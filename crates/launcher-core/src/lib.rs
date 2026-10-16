@@ -37,7 +37,7 @@ pub use model::{
     LauncherInfo, NewsItem, ServerEntry, ServerMap, Settings,
 };
 pub use patch::{
-    asset_matches, atomic_swap, check_zip_magic, copy_preserved, discard_previous,
+    asset_matches, atomic_swap, check_zip_magic, copy_preserved, discard_previous, resolve_preserved,
     download_with_resume, extract_zip, patch_game, previous_install_dir, restore_previous,
     swap_keeping_previous, verify_download, DownloadRequest, PatchJob, PatchProgress,
 };

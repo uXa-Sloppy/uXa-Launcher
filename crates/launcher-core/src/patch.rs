@@ -285,15 +285,44 @@ pub fn copy_preserved(from_install: &Path, staging: &Path, relatives: &[String])
                 "refusing to preserve path {relative:?}"
             )));
         }
-        let src = from_install.join(rel);
-        if !src.exists() {
-            continue;
+        for found in resolve_preserved(from_install, rel) {
+            let src = from_install.join(&found);
+            let dst = staging.join(&found);
+            tracing::info!("preserving {} -> {}", src.display(), dst.display());
+            copy_tree(&src, &dst)?;
         }
-        let dst = staging.join(rel);
-        tracing::info!("preserving {} -> {}", src.display(), dst.display());
-        copy_tree(&src, &dst)?;
     }
     Ok(())
+}
+
+/// Where a preserved path really lives in an install. A packaged Unreal game keeps its
+/// saves in `<install>/<Project>/Saved`, not `<install>/Saved`, so a configured `Saved`
+/// or `Saved/SaveGames` also matches the same path one folder down (`FridayNightFights/Saved`).
+/// Returns paths relative to `install`; empty when nothing exists.
+pub fn resolve_preserved(install: &Path, rel: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if install.join(rel).exists() {
+        out.push(rel.to_path_buf());
+    }
+    if let Ok(entries) = fs::read_dir(install) {
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir() && !t.is_symlink()).unwrap_or(false))
+            .map(|e| PathBuf::from(e.file_name()))
+            .filter(|name| {
+                let n = name.to_string_lossy();
+                !n.starts_with('.') && !n.eq_ignore_ascii_case("Engine") && Some(name.as_path()) != rel.components().next().map(|c| Path::new(c.as_os_str()))
+            })
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            let nested = dir.join(rel);
+            if install.join(&nested).exists() {
+                out.push(nested);
+            }
+        }
+    }
+    out
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
@@ -566,4 +595,52 @@ where
         message: format!("Installed {}", release.tag),
     });
     Ok(manifest)
+}
+
+#[cfg(test)]
+mod preserve_project_saved_tests {
+    use super::*;
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn keeps_unreal_project_saved_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        let staging = root.path().join("staging");
+        write(&install.join("FridayNightFights/Saved/SaveGames/FNF_Account.sav"), "acct");
+        write(&install.join("FridayNightFights/Saved/Config/WindowsServer/Game.ini"), "cfg");
+        write(&install.join("Engine/Saved/SaveGames/ignored.sav"), "engine");
+        fs::create_dir_all(&staging).unwrap();
+        copy_preserved(&install, &staging, &["Saved".to_string()]).unwrap();
+        assert_eq!(fs::read_to_string(staging.join("FridayNightFights/Saved/SaveGames/FNF_Account.sav")).unwrap(), "acct");
+        assert!(staging.join("FridayNightFights/Saved/Config/WindowsServer/Game.ini").is_file());
+        assert!(!staging.join("Engine/Saved").exists());
+    }
+
+    #[test]
+    fn client_style_subpaths_match_project_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        let staging = root.path().join("staging");
+        write(&install.join("FridayNightFights/Saved/SaveGames/FNF_Account_Char_Sloppy.sav"), "char");
+        fs::create_dir_all(&staging).unwrap();
+        copy_preserved(&install, &staging, &["Saved/SaveGames".to_string(), "Saved/Config".to_string()]).unwrap();
+        assert!(staging.join("FridayNightFights/Saved/SaveGames/FNF_Account_Char_Sloppy.sav").is_file());
+    }
+
+    #[test]
+    fn root_level_path_still_works() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        let staging = root.path().join("staging");
+        write(&install.join("Saved/a.txt"), "a");
+        fs::create_dir_all(&staging).unwrap();
+        copy_preserved(&install, &staging, &["Saved".to_string()]).unwrap();
+        assert!(staging.join("Saved/a.txt").is_file());
+        assert_eq!(resolve_preserved(&install, Path::new("Saved")), vec![PathBuf::from("Saved")]);
+    }
 }
