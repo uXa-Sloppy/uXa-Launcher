@@ -360,6 +360,10 @@ where
     };
     let private = matches!(visibility, RepoVisibility::Private);
     tracing::info!(%owner, %repo, private, "launcher repository visibility");
+    if matches!(visibility, RepoVisibility::NotVisible) {
+        tracing::warn!(%owner, %repo, token_saved = saved_token.map(|t| !t.trim().is_empty()).unwrap_or(false),
+            "launcher update repository is not visible: it is private and the saved GitHub token (if any) has no access to it; self-update cannot see new releases");
+    }
     let token = token_for_visibility(visibility, saved_token)?;
 
     let release = match fetch_latest_release(client, api_base, owner, repo, token.as_deref()).await

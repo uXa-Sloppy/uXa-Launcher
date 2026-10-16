@@ -437,8 +437,9 @@ async fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     };
     let (owner, repo) = update_repo(&settings, &catalog);
     Ok(Bootstrap {
-        launcher_version: catalog.launcher.version.clone(),
-        display_version: catalog.launcher.display_version.clone(),
+        launcher_version: env!("CARGO_PKG_VERSION").to_string(),
+        // Always the built version, so the sidebar cannot show a stale or shortened label (games.json said "v0.3").
+        display_version: format!("v{}", env!("CARGO_PKG_VERSION")),
         default_install_root: state.paths.default_install_root.display().to_string(),
         data_dir: state.paths.data_dir.display().to_string(),
         log_dir: state.paths.log_dir.display().to_string(),

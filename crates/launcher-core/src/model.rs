@@ -32,7 +32,7 @@ pub struct LauncherInfo {
 }
 
 fn default_display() -> String {
-    "v0.3.1".to_string()
+    "v0.3.2".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,7 +251,7 @@ mod tests {
     fn bundled_catalog_parses() {
         let catalog = load_catalog(include_str!("../../../config/games.json")).unwrap();
         assert_eq!(catalog.games.len(), 2);
-        assert_eq!(catalog.launcher.version, "0.3.1");
+        assert_eq!(catalog.launcher.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(catalog.launcher.update_owner, "uXa-Sloppy");
         assert_eq!(catalog.launcher.update_repo, "uXa-Launcher");
         let servers = load_servers(include_str!("../../../config/servers.json")).unwrap();
