@@ -678,16 +678,18 @@ fn player_count(install: &Path) -> Option<u32> {
     value.get("playerCount")?.as_u64().map(|n| n as u32)
 }
 
+/// Copy every Saved folder of the install (root `Saved` and the Unreal project's
+/// `<Project>/Saved`, where accounts and characters live) to `<backup_root>/<UTC stamp>`.
 fn backup_saved(install: &Path, backup_root: &Path) -> Result<Option<PathBuf>, String> {
-    let saved = install.join("Saved");
-    if !saved.is_dir() {
+    let found = launcher_core::resolve_preserved(install, Path::new("Saved"));
+    if found.is_empty() {
         return Ok(None);
     }
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let dest = backup_root.join(format!("{stamp}"));
     fs::create_dir_all(&dest).map_err(|err| err.to_string())?;
     copy_preserved(install, &dest, &["Saved".into()]).map_err(|err| err.to_string())?;
-    Ok(Some(dest.join("Saved")))
+    Ok(Some(dest))
 }
 
 fn locate_executable(install: &Path, name: &str) -> Option<PathBuf> {
