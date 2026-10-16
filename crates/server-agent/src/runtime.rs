@@ -438,18 +438,28 @@ impl Agent {
             if self.config.warn_seconds > 0 {
                 sleep(Duration::from_secs(self.config.warn_seconds)).await;
             }
-            match self.write_stdin("quit").await {
-                Ok(()) => self.log("sent quit"),
-                Err(err) => self.log(format!("quit command failed: {err}")),
-            }
-            let exited = self.wait_exit(self.config.quit_wait_secs).await;
-            if exited {
-                self.mark_offline();
-                self.log("server process exited");
-                return Ok(());
-            }
-            self.log("server did not exit after quit; stopping the process");
         }
+        // The UE server does not read stdin, so "quit" alone never reached it and every stop was a kill
+        // (no shutdown save). FNF 0.9.7+ watches <Project>/Saved/FNF_Quit.request, saves every character,
+        // Sanctum and the world, then exits on its own.
+        match request_clean_quit(&self.config.install_dir) {
+            Ok(n) if n > 0 => self.log(format!("asked the server to save and quit ({n} quit request file(s))")),
+            Ok(_) => self.log("no Saved folder for a quit request; trying the console quit"),
+            Err(err) => self.log(format!("quit request failed: {err}")),
+        }
+        match self.write_stdin("quit").await {
+            Ok(()) => self.log("sent quit"),
+            Err(err) => self.log(format!("quit command failed: {err}")),
+        }
+        let exited = self.wait_exit(self.config.quit_wait_secs).await;
+        if exited {
+            self.mark_offline();
+            self.log("server saved and exited");
+            clear_quit_requests(&self.config.install_dir);
+            return Ok(());
+        }
+        self.log("server did not exit after the quit request; stopping the process");
+        clear_quit_requests(&self.config.install_dir);
         self.kill_running().await?;
         self.log("server process stopped");
         Ok(())
@@ -672,8 +682,38 @@ fn read_version(dir: &Path) -> String {
         .to_string()
 }
 
+/// Name of the file FNF watches for a clean stop (FFNFServerCycle::QuitRequestPath).
+const QUIT_REQUEST: &str = "FNF_Quit.request";
+
+fn saved_dirs(install: &Path) -> Vec<PathBuf> {
+    launcher_core::resolve_preserved(install, Path::new("Saved"))
+        .into_iter()
+        .map(|rel| install.join(rel))
+        .collect()
+}
+
+/// Write the quit request into every Saved folder (root and `<Project>/Saved`). Returns how many were written.
+fn request_clean_quit(install: &Path) -> Result<usize, String> {
+    let mut written = 0;
+    for dir in saved_dirs(install) {
+        fs::write(dir.join(QUIT_REQUEST), "server agent stop\n").map_err(|err| err.to_string())?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+fn clear_quit_requests(install: &Path) {
+    for dir in saved_dirs(install) {
+        let _ = fs::remove_file(dir.join(QUIT_REQUEST));
+    }
+}
+
 fn player_count(install: &Path) -> Option<u32> {
-    let text = fs::read_to_string(install.join("Saved").join("uxa-status.json")).ok()?;
+    let path = saved_dirs(install)
+        .into_iter()
+        .map(|dir| dir.join("uxa-status.json"))
+        .find(|p| p.exists())?;
+    let text = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     value.get("playerCount")?.as_u64().map(|n| n as u32)
 }
@@ -755,4 +795,30 @@ where
             }
         }
     });
+}
+
+#[cfg(test)]
+mod clean_quit_tests {
+    use super::*;
+
+    #[test]
+    fn quit_request_lands_in_the_project_saved_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path();
+        fs::create_dir_all(install.join("FridayNightFights").join("Saved")).unwrap();
+        assert_eq!(request_clean_quit(install).unwrap(), 1);
+        assert!(install.join("FridayNightFights").join("Saved").join(QUIT_REQUEST).exists());
+        clear_quit_requests(install);
+        assert!(!install.join("FridayNightFights").join("Saved").join(QUIT_REQUEST).exists());
+    }
+
+    #[test]
+    fn status_file_is_read_from_the_project_saved_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path();
+        let saved = install.join("FridayNightFights").join("Saved");
+        fs::create_dir_all(&saved).unwrap();
+        fs::write(saved.join("uxa-status.json"), r#"{"playerCount":3}"#).unwrap();
+        assert_eq!(player_count(install), Some(3));
+    }
 }
