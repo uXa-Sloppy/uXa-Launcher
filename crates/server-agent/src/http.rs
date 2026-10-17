@@ -166,6 +166,7 @@ pub async fn serve_listener(agent: Arc<Agent>, listener: TcpListener) -> Result<
 }
 
 pub async fn serve(agent: Arc<Agent>) -> Result<(), String> {
+    agent.spawn_scheduler();
     if agent.config.tls_enabled() {
         let addr: SocketAddr = agent
             .config
@@ -187,9 +188,7 @@ pub async fn serve(agent: Arc<Agent>) -> Result<(), String> {
         let listener = TcpListener::bind(&agent.config.listen)
             .await
             .map_err(|err| format!("could not listen on {}: {err}", agent.config.listen))?;
-        let addr = listener
-            .local_addr()
-            .map_err(|err| err.to_string())?;
+        let addr = listener.local_addr().map_err(|err| err.to_string())?;
         agent.log(format!(
             "listening on http://{addr} without TLS; every request still requires a signed admin key"
         ));

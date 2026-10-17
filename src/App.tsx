@@ -667,6 +667,13 @@ function AdminDialog({
                 <span>Players {status?.playerCount ?? "—"}</span>
                 <span>{status?.phase || "—"}</span>
               </div>
+              <div className="status-line">
+                <span>Agent {status?.agentVersion || "—"}</span>
+                <span>Last check {status?.lastCheckAt || "—"}{status?.lastCheckResult ? ` · ${status.lastCheckResult}` : ""}</span>
+                <span>Last update {status?.lastUpdateAt || "—"}{status?.lastUpdateResult ? ` · ${status.lastUpdateResult}` : ""}</span>
+                <span>Staged {status?.stagedVersion || "—"}</span>
+                <span>Next restart {status?.nextRestartAt || "—"}</span>
+              </div>
               <div className="row-actions">
                 <button type="button" className="btn primary" disabled={busy || !tag} onClick={() => setConfirm("deploy")}>
                   Deploy &amp; Restart

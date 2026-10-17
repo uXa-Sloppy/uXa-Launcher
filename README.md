@@ -76,13 +76,43 @@ The agent listens on its own port (default `8788`) and does four things when ask
 3. Swap the new build into place and keep `Saved` and `Config`.
 4. Start it with the configured arguments and `-port=7777`, wait until the process is still running, and put the previous build back if it exits.
 
+The agent also does this by itself. With `autoUpdate` left at its defaults it checks GitHub about 30 seconds after it starts, then every 6 hours. A newer dedicated-server zip is downloaded and unpacked under the work directory. The running server is not stopped for that check. The game server is restarted only inside a daily window, default `03:00` in `America/New_York` (US Eastern, including daylight saving) and only for 10 minutes after that time. If a build is staged, that restart installs it. If nothing is staged, the server still restarts once that day so the host comes back clean. A boot later in the morning does not catch up. The agent executable may replace itself at a check; that restart does not send `quit` to the game server.
+
+`Saved` is copied to a timestamped folder before an install or the daily restart. The last 7 copies are kept (`keepBackups`, and `0` keeps every copy). A `Saved` folder inside the downloaded zip is discarded when the live install has one, including `<Project>/Saved`. If the new build dies during the health wait, the previous install is put back and the timestamped `Saved` copy is restored over it. The live `Saved` directory is not deleted to make room for the zip.
+
+Version tags with two, three, or four numeric parts are ordered numerically. `v0.9.7.2` and `v0.9.7.2-build18g` are both newer than `0.9.6` and `0.9.6.1`. The same numbers without a suffix are newer than that suffix. Scheduled checks pick the highest version, not whichever release GitHub listed first. Launcher release checks use the same comparison.
+
+```json
+"autoUpdate": {
+  "enabled": true,
+  "intervalHours": 6,
+  "checkAfterStartSecs": 30,
+  "checkTimes": [],
+  "serverEnabled": true,
+  "agentEnabled": true,
+  "agentOwner": "uXa-Sloppy",
+  "agentRepo": "uXa-Launcher",
+  "agentAsset": "uxa-server-agent.exe",
+  "restartTime": "03:00",
+  "restartTimeZone": "America/New_York",
+  "restartWindowMinutes": 10,
+  "dailyRestart": true,
+  "keepBackups": 7,
+  "graceSeconds": 180
+}
+```
+
+`checkTimes` are extra check clocks in `restartTimeZone`. They do not restart the server. `graceSeconds` is how long a restart waits when `Saved/uxa-status.json` says players are online. An unknown player count uses `warnSeconds` instead. The agent release is the public `uXa-Sloppy/uXa-Launcher` latest stable build; `UXA_GITHUB_TOKEN` is sent only if the anonymous request fails. `FNF` release checks keep using that token when it is already configured, because that repo may be private. Nothing in `agent.json` may be named secret or token.
+
+Each check and install is appended to `updates.log` in the log directory and to the admin log. Status adds `agentVersion`, `lastCheckAt`, `lastCheckResult`, `lastUpdateAt`, `lastUpdateResult`, `stagedVersion`, and `nextRestartAt`. A manual Deploy still installs immediately. Set `enabled` to false to keep the scheduler off.
+
 Every request carries `X-Uxa-Timestamp` and `X-Uxa-Signature`, an HMAC-SHA256 of `{unix_seconds}\n{METHOD}\n{path}\n{sha256(body)}`. The timestamp must be within five minutes. Set `tlsCert` and `tlsKey` in `agent.json` to serve HTTPS with those same signatures. Without a certificate the listener is HTTP, which is what the local mock uses; put a real certificate on a machine that faces the network, or terminate TLS in front of it. The launcher trusts the system certificate store.
 
 There is no built-in admin key. The agent reads, in order, `UXA_AGENT_SECRET`, `UXA_AGENT_SECRET_FILE`, then `agent.secret` next to the executable or the config. A GitHub token, if the releases are private, is `UXA_GITHUB_TOKEN` only. If `agent.json` contains a secret or token field, the agent refuses to start. `config/agent.example.json` is the shape of that file.
 
 `config/servers.json` points Dolmar's Server at `https://71.71.45.128:8788`. That address is not a secret. `UXA_AGENT_URL` overrides every server's agent address for a local test.
 
-In the launcher, Settings has an admin key field. Unlock asks the agent for status. A 401 stays locked and shows no Admin section. Remembering the key stores it in Windows Credential Manager, or in a user-only `agent-secret` file otherwise. After it unlocks, Admin shows the server, the matching releases, Deploy & Restart, Restart only, Stop, a confirm step, and a live log with version, online, uptime, and player count. Player count is read from `Saved/uxa-status.json` when the server writes one; otherwise it stays unknown.
+In the launcher, Settings has an admin key field. Unlock asks the agent for status. A 401 stays locked and shows no Admin section. Remembering the key stores it in Windows Credential Manager, or in a user-only `agent-secret` file otherwise. After it unlocks, Admin shows the server, the matching releases, Deploy & Restart, Restart only, Stop, a confirm step, and a live log with version, online, uptime, and player count. A second line shows the agent build, the last check, the last update, the staged server version, and the next restart time. Player count is read from `Saved/uxa-status.json` when the server writes one; otherwise it stays unknown.
 
 ### Install the agent on Windows
 
@@ -181,7 +211,8 @@ Pushing `main`, pushing a `v*` tag, or running the workflow by hand runs `.githu
 `npm test` runs `cargo test -p launcher-core -p uxa-server-agent`. The launcher tests cover:
 
 - choosing the `Client` + `Win64` zip and ignoring server/Linux assets
-- semver comparison of release tags
+- semver comparison of release tags, including four-part versions and suffixes such as `v0.9.7.2-build18g`
+- the server agent staging an update without stopping the process, installing it only from `apply_maintenance`, and restoring `Saved` when that build exits
 - resume via HTTP Range
 - rejecting zip paths that escape the install directory
 - a failed archive leaving the existing install untouched

@@ -105,6 +105,13 @@ export interface AgentStatus {
   playerCount: number | null;
   port: number;
   phase: string;
+  agentVersion?: string;
+  lastCheckAt?: string;
+  lastCheckResult?: string;
+  lastUpdateAt?: string;
+  lastUpdateResult?: string;
+  stagedVersion?: string;
+  nextRestartAt?: string;
 }
 
 export interface AgentRelease {

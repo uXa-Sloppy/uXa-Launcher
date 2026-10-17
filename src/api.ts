@@ -136,6 +136,13 @@ function previewStatus(): AgentStatus {
     playerCount: previewAdmin.online ? previewAdmin.playerCount : null,
     port: 7777,
     phase: previewAdmin.phase,
+    agentVersion: "0.3.3",
+    lastCheckAt: "2026-10-17T07:00:00Z",
+    lastCheckResult: "up to date",
+    lastUpdateAt: "2026-10-17T07:00:12Z",
+    lastUpdateResult: "restarted",
+    stagedVersion: "",
+    nextRestartAt: "2026-10-18T03:00:00-04:00",
   };
 }
 

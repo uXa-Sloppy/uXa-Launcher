@@ -4,6 +4,8 @@
 mod config;
 mod http;
 mod runtime;
+mod schedule;
+mod update;
 
 use std::path::Path;
 
@@ -29,9 +31,10 @@ pub fn init_logging(log_dir: &Path) {
 #[cfg(windows)]
 mod service;
 
-pub use config::{load_config, AgentConfig};
+pub use config::{load_config, AgentConfig, AutoUpdateConfig};
 pub use http::{serve, serve_listener};
-pub use runtime::Agent;
+pub use runtime::{Agent, Fail};
+pub use update::SelfUpdateOutcome;
 
 #[cfg(windows)]
 pub use service::run_service;

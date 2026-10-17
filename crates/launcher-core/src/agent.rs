@@ -17,6 +17,23 @@ pub struct AgentStatus {
     pub player_count: Option<u32>,
     pub port: u16,
     pub phase: String,
+    /// uXa Server Agent build. Empty when an older agent did not send it.
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub last_check_at: String,
+    #[serde(default)]
+    pub last_check_result: String,
+    #[serde(default)]
+    pub last_update_at: String,
+    #[serde(default)]
+    pub last_update_result: String,
+    /// Server build downloaded and waiting for the daily restart window.
+    #[serde(default)]
+    pub staged_version: String,
+    /// Next time the game server may be restarted, RFC3339 with the zone offset.
+    #[serde(default)]
+    pub next_restart_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +76,11 @@ fn error_message(status: u16, body: &str) -> String {
             }
         }
     }
-    let detail = body.chars().take(180).collect::<String>().replace('\n', " ");
+    let detail = body
+        .chars()
+        .take(180)
+        .collect::<String>()
+        .replace('\n', " ");
     if detail.is_empty() {
         format!("Server agent returned {status}")
     } else {
@@ -98,17 +119,11 @@ pub async fn agent_exchange(
         .body(body.to_vec())
         .send()
         .await
-        .map_err(|err| {
-            Error::msg(format!(
-                "Could not reach the server agent at {base}: {err}"
-            ))
-        })?;
+        .map_err(|err| Error::msg(format!("Could not reach the server agent at {base}: {err}")))?;
     let status = response.status().as_u16();
     let text = response.text().await.unwrap_or_default();
     if status == 401 {
-        return Err(Error::msg(
-            "Admin key was rejected by the server agent.",
-        ));
+        return Err(Error::msg("Admin key was rejected by the server agent."));
     }
     if !(200..300).contains(&status) {
         return Err(Error::msg(error_message(status, &text)));
