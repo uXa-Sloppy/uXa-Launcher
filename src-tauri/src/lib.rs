@@ -1,19 +1,19 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use launcher_core::{
-    agent_exchange, cleanup_previous_launcher, download_launcher_update, http_client,
-    inspect_game as inspect_release, load_catalog, load_news, load_servers, load_settings,
-    execute_cli, patch_game, prepare_client_launch, probe_tcp, read_manifest, redact_cli,
-    replace_executable, resolve_install_dir, resolve_update_repo, restore_previous_launcher,
-    running_from_cargo_target, save_settings as write_settings, spawn_process, verify_exe_file,
-    write_manifest, AgentAction, CliInput, EXIT_FAILURE,
-    AgentLogLine, AgentReleaseSummary, AgentStatus, Catalog, GameDef, GameSource, GameStatus,
-    InspectRequest, LauncherUpdateFetch, NewsItem, PatchJob, PatchProgress, PreparedLauncherUpdate,
-    ReleaseSource, ServerEntry, ServerMap, Settings, LAUNCHER_EXE_ASSET,
+    agent_exchange, cleanup_previous_launcher, command_label, download_launcher_update,
+    execute_cli, failure_cli_result, http_client, inspect_game as inspect_release, load_catalog,
+    load_news, load_servers, load_settings, patch_game, prepare_client_launch, probe_tcp,
+    read_manifest, redact_cli, replace_executable, resolve_install_dir, resolve_update_repo,
+    restore_previous_launcher, running_from_cargo_target, save_settings as write_settings,
+    spawn_process, try_local_cli, verify_exe_file, write_cli_result, write_manifest, AgentAction,
+    AgentLogLine, AgentReleaseSummary, AgentStatus, Catalog, CliInput, CliResultFile, GameDef,
+    GameSource, GameStatus, InspectRequest, LauncherUpdateFetch, NewsItem, PatchJob, PatchProgress,
+    PreparedLauncherUpdate, ReleaseSource, ServerEntry, ServerMap, Settings, EXIT_FAILURE,
+    LAUNCHER_EXE_ASSET,
 };
 pub use launcher_core::{parse_cli, CliCommand, EXIT_USAGE};
 use serde::Serialize;
@@ -1258,46 +1258,52 @@ pub fn run() {
         .expect("error while running uXa Launcher");
 }
 
-/// Run one CLI command and exit. Does not open a window, does not install a
-/// launcher update, and does not write the admin key or settings.
-pub fn run_headless(command: CliCommand) -> i32 {
+pub struct HeadlessOutcome {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// `%LOCALAPPDATA%\uXa Launcher\cli-last.json`, or `UXA_CLI_RESULT` when set.
+pub fn cli_result_path() -> PathBuf {
+    if let Some(path) = env_path("UXA_CLI_RESULT") {
+        return path;
+    }
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("uXa Launcher")
+        .join("cli-last.json")
+}
+
+/// Run one CLI command. Does not open a window, does not install a launcher
+/// update, and does not write the admin key or settings. The caller prints
+/// `stdout` and `stderr` after the Windows console is attached.
+pub fn run_headless(command: CliCommand) -> HeadlessOutcome {
     let paths = app_paths();
     let _ = fs::create_dir_all(&paths.data_dir);
     let _ = fs::create_dir_all(&paths.log_dir);
     let _ = fs::create_dir_all(&paths.manifest_dir);
     let _ = fs::create_dir_all(&paths.download_dir);
     init_logging(&paths.log_dir, false);
+    let label = command_label(&command);
     if let Ok(exe) = std::env::current_exe() {
         cleanup_previous_launcher(&exe);
     }
+    let version = env!("CARGO_PKG_VERSION");
     let games = match read_override(&paths.data_dir, "games.json", GAMES_JSON) {
         Ok(text) => text,
-        Err(err) => {
-            eprintln!("{}", redact_cli(&err, &[]));
-            return EXIT_FAILURE;
-        }
+        Err(err) => return headless_failure(&label, version, redact_cli(&err, &[])),
     };
     let servers = match read_override(&paths.data_dir, "servers.json", SERVERS_JSON) {
         Ok(text) => text,
-        Err(err) => {
-            eprintln!("{}", redact_cli(&err, &[]));
-            return EXIT_FAILURE;
-        }
+        Err(err) => return headless_failure(&label, version, redact_cli(&err, &[])),
     };
     let admin_key = load_agent_secret(&paths.data_dir);
     let github_token = load_token(&paths.data_dir);
-    let client = match http_client() {
-        Ok(client) => client,
-        Err(err) => {
-            let secrets = secret_refs(&admin_key, &github_token);
-            eprintln!("{}", redact_cli(&err.to_string(), &secrets));
-            return EXIT_FAILURE;
-        }
-    };
     let api = api_base();
     let agent_env = env_string("UXA_AGENT_URL");
     let input = CliInput {
-        launcher_version: env!("CARGO_PKG_VERSION"),
+        launcher_version: version,
         data_dir: &paths.data_dir,
         install_root: &paths.default_install_root,
         games_json: &games,
@@ -1307,20 +1313,80 @@ pub fn run_headless(command: CliCommand) -> i32 {
         admin_key: admin_key.as_deref(),
         github_token: github_token.as_deref(),
     };
-    let report = tauri::async_runtime::block_on(execute_cli(&client, &input, command));
-    let mut stdout = std::io::stdout();
-    let mut stderr = std::io::stderr();
-    let _ = stdout.write_all(report.stdout.as_bytes());
-    let _ = stdout.flush();
-    let _ = stderr.write_all(report.stderr.as_bytes());
-    let _ = stderr.flush();
-    if report.exit_code != 0 && !report.stderr.is_empty() {
+    let report = if let Some(report) = try_local_cli(&input, &command) {
+        report
+    } else {
+        let client = match http_client() {
+            Ok(client) => client,
+            Err(err) => {
+                let secrets = secret_refs(&admin_key, &github_token);
+                return headless_failure(&label, version, redact_cli(&err.to_string(), &secrets));
+            }
+        };
+        tauri::async_runtime::block_on(execute_cli(&client, &input, command))
+    };
+    let mut stderr = report.stderr.clone();
+    let mut code = report.exit_code;
+    let record = launcher_core::cli_result_record(&label, &report);
+    if let Some(err) = persist_cli_result(&record) {
+        stderr.push_str(&err);
+        if code == 0 {
+            code = EXIT_FAILURE;
+        }
+    }
+    if code != 0 && !report.stderr.trim().is_empty() {
         tracing::error!("{}", report.stderr.trim());
     }
-    report.exit_code
+    HeadlessOutcome {
+        code,
+        stdout: report.stdout,
+        stderr,
+    }
 }
 
-fn secret_refs<'a>(admin_key: &'a Option<String>, github_token: &'a Option<String>) -> Vec<&'a str> {
+fn headless_failure(command: &str, launcher_version: &str, message: String) -> HeadlessOutcome {
+    let record = failure_cli_result(command, launcher_version, &message, EXIT_FAILURE);
+    let mut stderr = if message.ends_with('\n') {
+        message
+    } else {
+        format!("{message}\n")
+    };
+    if let Some(err) = persist_cli_result(&record) {
+        stderr.push_str(&err);
+    }
+    tracing::error!("{}", stderr.trim());
+    HeadlessOutcome {
+        code: EXIT_FAILURE,
+        stdout: String::new(),
+        stderr,
+    }
+}
+
+fn persist_cli_result(record: &CliResultFile) -> Option<String> {
+    let path = cli_result_path();
+    match write_cli_result(&path, record) {
+        Ok(()) => {
+            tracing::info!(
+                command = %record.command,
+                ok = record.ok,
+                exit = record.exit_code,
+                path = %path.display(),
+                "cli result written"
+            );
+            None
+        }
+        Err(err) => {
+            let line = format!("Could not write {}: {err}\n", path.display());
+            tracing::error!("{line}");
+            Some(line)
+        }
+    }
+}
+
+fn secret_refs<'a>(
+    admin_key: &'a Option<String>,
+    github_token: &'a Option<String>,
+) -> Vec<&'a str> {
     [admin_key.as_deref(), github_token.as_deref()]
         .into_iter()
         .flatten()

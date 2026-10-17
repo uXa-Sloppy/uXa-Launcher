@@ -55,6 +55,169 @@ pub struct CliReport {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    pub versions: CliVersions,
+}
+
+/// Versions an automation script can read without parsing the console text.
+/// `client` and `server` are null when that command did not learn them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliVersions {
+    pub launcher: String,
+    pub client: Option<String>,
+    pub server: Option<String>,
+}
+
+impl CliVersions {
+    fn empty() -> Self {
+        Self {
+            launcher: String::new(),
+            client: None,
+            server: None,
+        }
+    }
+}
+
+/// One CLI run, written to `cli-last.json` for scripts that cannot see a console.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliResultFile {
+    pub command: String,
+    pub ok: bool,
+    pub message: String,
+    pub versions: CliVersions,
+    pub timestamp: String,
+    pub exit_code: i32,
+}
+
+/// What a Windows GUI-subsystem process inherited for one standard handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InheritedHandle {
+    /// No handle. A release build launched from a console looks like this
+    /// unless the shell redirected that stream.
+    Missing,
+    /// Already a console. Debug builds, and `AllocConsole`, land here.
+    Console,
+    /// A pipe or file. `> out.txt` and `|` must keep this handle.
+    Redirected,
+}
+
+/// Whether to attach a console and which standard handles may be replaced.
+/// Replacing a redirected handle is what made `--version > file` empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StdioPlan {
+    pub attach_console: bool,
+    pub replace_stdout: bool,
+    pub replace_stderr: bool,
+}
+
+pub fn stdio_plan(stdout: InheritedHandle, stderr: InheritedHandle) -> StdioPlan {
+    let replace_stdout = matches!(stdout, InheritedHandle::Missing);
+    let replace_stderr = matches!(stderr, InheritedHandle::Missing);
+    StdioPlan {
+        attach_console: replace_stdout || replace_stderr,
+        replace_stdout,
+        replace_stderr,
+    }
+}
+
+pub fn command_label(command: &CliCommand) -> String {
+    match command {
+        CliCommand::Help => "--help".into(),
+        CliCommand::Version => "--version".into(),
+        CliCommand::Status => "--status".into(),
+        CliCommand::UpdateClient => "--update-client".into(),
+        CliCommand::DeployServer { version } => format!("--deploy-server {version}"),
+    }
+}
+
+pub fn cli_result_record(command: &str, report: &CliReport) -> CliResultFile {
+    CliResultFile {
+        command: command.to_string(),
+        ok: report.exit_code == 0,
+        message: redact_secrets(&result_message(report)),
+        versions: report.versions.clone(),
+        timestamp: utc_timestamp(),
+        exit_code: report.exit_code,
+    }
+}
+
+pub fn usage_cli_result(launcher_version: &str, command: &str, message: &str) -> CliResultFile {
+    CliResultFile {
+        command: command.to_string(),
+        ok: false,
+        message: redact_secrets(message.trim()),
+        versions: CliVersions {
+            launcher: launcher_version.to_string(),
+            client: None,
+            server: None,
+        },
+        timestamp: utc_timestamp(),
+        exit_code: EXIT_USAGE,
+    }
+}
+
+pub fn failure_cli_result(
+    command: &str,
+    launcher_version: &str,
+    message: &str,
+    exit_code: i32,
+) -> CliResultFile {
+    CliResultFile {
+        command: command.to_string(),
+        ok: false,
+        message: redact_secrets(message.trim()),
+        versions: CliVersions {
+            launcher: launcher_version.to_string(),
+            client: None,
+            server: None,
+        },
+        timestamp: utc_timestamp(),
+        exit_code,
+    }
+}
+
+/// Replace `path` with the result. A reader never sees a half-written file.
+pub fn write_cli_result(path: &Path, result: &CliResultFile) -> Result<(), String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create {}: {err}", parent.display()))?;
+    }
+    let mut result = result.clone();
+    result.message = redact_secrets(&result.message);
+    let mut body = serde_json::to_vec_pretty(&result).map_err(|err| err.to_string())?;
+    if !body.ends_with(b"\n") {
+        body.push(b'\n');
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &body).map_err(|err| format!("Could not write {}: {err}", tmp.display()))?;
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|err| format!("Could not replace {}: {err}", path.display()))?;
+    }
+    fs::rename(&tmp, path).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        format!("Could not write {}: {err}", path.display())
+    })?;
+    Ok(())
+}
+
+fn result_message(report: &CliReport) -> String {
+    let stdout = report.stdout.trim();
+    let stderr = report.stderr.trim();
+    match (report.exit_code == 0, stdout.is_empty(), stderr.is_empty()) {
+        (true, _, _) => stdout.to_string(),
+        (false, true, _) => stderr.to_string(),
+        (false, false, true) => stdout.to_string(),
+        (false, false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+fn utc_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 pub fn parse_cli(args: &[String]) -> Result<Option<CliCommand>, String> {
@@ -129,6 +292,10 @@ do not open a window. They still run when the window is already open.
 The server list is the bundled config, or %LOCALAPPDATA%\\uXa\\Launcher\\servers.json
 when that file is present. Deploy and status use the saved admin key. Unlock
 admin once in the launcher window if the key is not saved yet.
+
+Every command also writes %LOCALAPPDATA%\\uXa Launcher\\cli-last.json with
+command, ok, message, versions, timestamp, and exitCode. Success exits 0.
+A failed command exits 1. A bad argument exits 2.
 "
     )
 }
@@ -149,23 +316,19 @@ pub async fn execute_cli(
     input: &CliInput<'_>,
     command: CliCommand,
 ) -> CliReport {
+    if let Some(report) = try_local_cli(input, &command) {
+        return report;
+    }
+    let guard = ProtectedSnapshot::capture(input.data_dir);
     let report = match command {
-        CliCommand::Help => ok_report(help_text(input.launcher_version)),
-        CliCommand::Version => ok_report(format!("uXa Launcher {}\n", input.launcher_version)),
-        CliCommand::Status => {
-            let guard = ProtectedSnapshot::capture(input.data_dir);
-            finish(input, guard, status(client, input).await)
+        CliCommand::Help | CliCommand::Version => {
+            fail_report(String::new(), "This command could not be run.")
         }
-        CliCommand::UpdateClient => {
-            let guard = ProtectedSnapshot::capture(input.data_dir);
-            finish(input, guard, update_client(client, input).await)
-        }
-        CliCommand::DeployServer { version } => {
-            let guard = ProtectedSnapshot::capture(input.data_dir);
-            finish(input, guard, deploy(client, input, &version).await)
-        }
+        CliCommand::Status => status(client, input).await,
+        CliCommand::UpdateClient => update_client(client, input).await,
+        CliCommand::DeployServer { version } => deploy(client, input, &version).await,
     };
-    report
+    finish(input, guard, report)
 }
 
 fn finish(input: &CliInput<'_>, guard: ProtectedSnapshot, mut report: CliReport) -> CliReport {
@@ -178,7 +341,22 @@ fn finish(input: &CliInput<'_>, guard: ProtectedSnapshot, mut report: CliReport)
             "The command would have changed saved launcher settings. Those files were restored.\n",
         );
     }
+    if report.versions.launcher.is_empty() {
+        report.versions.launcher = input.launcher_version.to_string();
+    }
     report
+}
+
+/// Help and version do not touch the network, the admin key, or settings.
+pub fn try_local_cli(input: &CliInput<'_>, command: &CliCommand) -> Option<CliReport> {
+    let stdout = match command {
+        CliCommand::Help => help_text(input.launcher_version),
+        CliCommand::Version => format!("uXa Launcher {}\n", input.launcher_version),
+        _ => return None,
+    };
+    let mut report = ok_report(stdout);
+    report.versions.launcher = input.launcher_version.to_string();
+    Some(report)
 }
 
 fn secret_list<'a>(input: &'a CliInput<'a>) -> Vec<&'a str> {
@@ -193,6 +371,7 @@ fn ok_report(stdout: String) -> CliReport {
         exit_code: EXIT_OK,
         stdout,
         stderr: String::new(),
+        versions: CliVersions::empty(),
     }
 }
 
@@ -205,46 +384,80 @@ fn fail_report(stdout: String, stderr: impl Into<String>) -> CliReport {
         exit_code: EXIT_FAILURE,
         stdout,
         stderr,
+        versions: CliVersions::empty(),
     }
 }
 
 async fn status(client: &reqwest::Client, input: &CliInput<'_>) -> CliReport {
     let mut stdout = format!("Launcher: {}\n", input.launcher_version);
+    let mut client_version = None;
     let loaded = match load_context(input) {
         Ok(loaded) => loaded,
-        Err(err) => return fail_report(stdout, err),
+        Err(err) => return known(input, fail_report(stdout, err), None, None),
     };
     match read_manifest(&manifest_path(input.data_dir)) {
-        Ok(Some(manifest)) => stdout.push_str(&format!("Client: {}\n", manifest.version)),
+        Ok(Some(manifest)) => {
+            client_version = Some(manifest.version.clone());
+            stdout.push_str(&format!("Client: {}\n", manifest.version));
+        }
         Ok(None) => stdout.push_str("Client: not installed\n"),
         Err(err) => {
-            return fail_report(
-                stdout,
-                format!("Could not read the installed client: {err}"),
+            return known(
+                input,
+                fail_report(
+                    stdout,
+                    format!("Could not read the installed client: {err}"),
+                ),
+                None,
+                None,
             )
         }
     }
     let server = match pick_server(&loaded.settings, &loaded.servers) {
         Ok(server) => server,
-        Err(err) => return fail_report(stdout, err),
+        Err(err) => return known(input, fail_report(stdout, err), client_version, None),
     };
     stdout.push_str(&format!("Server: {}\n", server.name));
     let secret = match saved_secret(input.admin_key) {
         Some(secret) => secret,
-        None => return fail_report(stdout, MISSING_ADMIN_KEY),
+        None => {
+            return known(
+                input,
+                fail_report(stdout, MISSING_ADMIN_KEY),
+                client_version,
+                None,
+            )
+        }
     };
     let base = match agent_base(server, input.agent_url_override) {
         Ok(base) => base,
-        Err(err) => return fail_report(stdout, err),
+        Err(err) => return known(input, fail_report(stdout, err), client_version, None),
     };
     match agent_status(client, &base, secret).await {
         Ok(agent) => {
             stdout.push_str(&format!("Server version: {}\n", agent.version));
             stdout.push_str(&format!("Server online: {}\n", yes_no(agent.online)));
-            ok_report(stdout)
+            known(
+                input,
+                ok_report(stdout),
+                client_version,
+                Some(agent.version),
+            )
         }
-        Err(err) => fail_report(stdout, err),
+        Err(err) => known(input, fail_report(stdout, err), client_version, None),
     }
+}
+
+fn known(
+    input: &CliInput<'_>,
+    mut report: CliReport,
+    client_version: Option<String>,
+    server_version: Option<String>,
+) -> CliReport {
+    report.versions.launcher = input.launcher_version.to_string();
+    report.versions.client = client_version;
+    report.versions.server = server_version;
+    report
 }
 
 async fn update_client(client: &reqwest::Client, input: &CliInput<'_>) -> CliReport {
@@ -316,7 +529,9 @@ async fn update_client(client: &reqwest::Client, input: &CliInput<'_>) -> CliRep
         );
     }
     lines.push(format!("Client: {}", manifest.version));
-    ok_report(format!("{}\n", lines.join("\n")))
+    let mut report = ok_report(format!("{}\n", lines.join("\n")));
+    report.versions.client = Some(manifest.version);
+    report
 }
 
 async fn deploy(client: &reqwest::Client, input: &CliInput<'_>, version: &str) -> CliReport {
@@ -363,11 +578,13 @@ async fn deploy(client: &reqwest::Client, input: &CliInput<'_>, version: &str) -
         "Server online: {}\n",
         yes_no(action.status.online)
     ));
-    if action.ok {
+    let mut report = if action.ok {
         ok_report(stdout)
     } else {
         fail_report(stdout, "Deploy did not succeed.")
-    }
+    };
+    report.versions.server = Some(action.status.version);
+    report
 }
 
 struct Loaded {
@@ -860,6 +1077,9 @@ mod tests {
         assert!(status_report.stdout.contains("Server: Dolmar's Server"));
         assert!(status_report.stdout.contains("Server version: v8.0.0"));
         assert!(status_report.stdout.contains("Server online: yes"));
+        assert_eq!(status_report.versions.launcher, "0.3.1");
+        assert_eq!(status_report.versions.client, None);
+        assert_eq!(status_report.versions.server.as_deref(), Some("v8.0.0"));
         assert_untouched(&fixture, &status_report);
 
         let deploy_report = execute_cli(
@@ -1014,7 +1234,86 @@ mod tests {
         let version = runtime.block_on(execute_cli(&client, &input, CliCommand::Version));
         assert_eq!(version.exit_code, EXIT_OK);
         assert_eq!(version.stdout, "uXa Launcher 0.3.1\n");
+        assert_eq!(version.versions.launcher, "0.3.1");
+        assert_eq!(version.versions.client, None);
+        assert_eq!(version.versions.server, None);
         assert!(!dir.path().join("settings.json").exists());
         assert!(!dir.path().join("agent-secret").exists());
+    }
+
+    #[test]
+    fn redirected_handles_are_not_replaced_by_a_console() {
+        let keep = stdio_plan(InheritedHandle::Redirected, InheritedHandle::Redirected);
+        assert!(!keep.attach_console);
+        assert!(!keep.replace_stdout);
+        assert!(!keep.replace_stderr);
+
+        let console = stdio_plan(InheritedHandle::Console, InheritedHandle::Console);
+        assert!(!console.attach_console);
+
+        let gui = stdio_plan(InheritedHandle::Missing, InheritedHandle::Missing);
+        assert!(gui.attach_console);
+        assert!(gui.replace_stdout);
+        assert!(gui.replace_stderr);
+
+        // `program > file` redirects stdout only. The pipe must stay the pipe.
+        let stdout_file = stdio_plan(InheritedHandle::Redirected, InheritedHandle::Missing);
+        assert!(stdout_file.attach_console);
+        assert!(!stdout_file.replace_stdout);
+        assert!(stdout_file.replace_stderr);
+    }
+
+    #[test]
+    fn cli_result_file_records_success_failure_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cli-last.json");
+
+        let mut version = ok_report("uXa Launcher 0.3.3\n".into());
+        version.versions.launcher = "0.3.3".into();
+        let record = cli_result_record("--version", &version);
+        write_cli_result(&path, &record).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["command"], "--version");
+        assert_eq!(saved["ok"], true);
+        assert_eq!(saved["exitCode"], 0);
+        assert_eq!(saved["message"], "uXa Launcher 0.3.3");
+        assert_eq!(saved["versions"]["launcher"], "0.3.3");
+        assert!(saved["versions"]["client"].is_null());
+        assert!(saved["versions"]["server"].is_null());
+        let stamp = saved["timestamp"].as_str().unwrap();
+        assert!(stamp.ends_with('Z'), "{stamp}");
+        assert!(stamp.contains('T'), "{stamp}");
+
+        let mut failed = fail_report(
+            "Launcher: 0.3.3\n".into(),
+            "No admin key is saved. token ghp_cliTestTokenValue123\n",
+        );
+        failed.versions.launcher = "0.3.3".into();
+        failed.versions.client = Some("v0.9.7.2".into());
+        write_cli_result(&path, &cli_result_record("--status", &failed)).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["command"], "--status");
+        assert_eq!(saved["ok"], false);
+        assert_eq!(saved["exitCode"], 1);
+        assert_eq!(saved["versions"]["client"], "v0.9.7.2");
+        assert!(saved["versions"]["server"].is_null());
+        let message = saved["message"].as_str().unwrap();
+        assert!(message.contains("No admin key"));
+        assert!(!message.contains("ghp_"));
+        assert!(message.contains("[redacted]"));
+
+        let usage = usage_cli_result("0.3.3", "--nope", "Unknown argument --nope.");
+        assert!(!usage.ok);
+        assert_eq!(usage.exit_code, EXIT_USAGE);
+        write_cli_result(&path, &usage).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["command"], "--nope");
+        assert_eq!(saved["ok"], false);
+        assert_eq!(saved["exitCode"], 2);
+        assert_eq!(saved["versions"]["launcher"], "0.3.3");
+        assert!(!dir.path().join("settings.json").exists());
     }
 }

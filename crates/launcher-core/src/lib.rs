@@ -17,7 +17,9 @@ mod web;
 
 pub use agent::{agent_exchange, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus};
 pub use cli::{
-    execute_cli, help_text, parse_cli, redact_cli, CliCommand, CliInput, CliReport, EXIT_FAILURE,
+    cli_result_record, command_label, execute_cli, failure_cli_result, help_text, parse_cli,
+    redact_cli, stdio_plan, try_local_cli, usage_cli_result, write_cli_result, CliCommand,
+    CliInput, CliReport, CliResultFile, CliVersions, InheritedHandle, StdioPlan, EXIT_FAILURE,
     EXIT_OK, EXIT_USAGE, MISSING_ADMIN_KEY,
 };
 pub use error::{Error, Result};
@@ -37,9 +39,10 @@ pub use model::{
     LauncherInfo, NewsItem, ServerEntry, ServerMap, Settings,
 };
 pub use patch::{
-    asset_matches, atomic_swap, check_zip_magic, copy_preserved, discard_previous, resolve_preserved,
-    download_with_resume, extract_zip, patch_game, previous_install_dir, restore_previous,
-    swap_keeping_previous, verify_download, DownloadRequest, PatchJob, PatchProgress,
+    asset_matches, atomic_swap, check_zip_magic, copy_preserved, discard_previous,
+    download_with_resume, extract_zip, patch_game, previous_install_dir, resolve_preserved,
+    restore_previous, swap_keeping_previous, verify_download, DownloadRequest, PatchJob,
+    PatchProgress,
 };
 pub use self_update::{
     backup_path, cleanup_previous_launcher, download_launcher_update, file_sha256,

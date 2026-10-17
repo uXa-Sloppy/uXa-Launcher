@@ -31,6 +31,23 @@ Out of scope: an intro video, accounts, and login. This repo does not modify Fri
 
 The same `uxa-launcher.exe` accepts commands so a shell can deploy and patch without opening the window. On Windows the installed copy is `%LOCALAPPDATA%\uXa Launcher\uxa-launcher.exe`. These commands still run when the window is already open. They print plain progress to the console and return exit code 0 on success. A failure returns 1. An unknown flag returns 2.
 
+Release builds are Windows GUI programs, so a double-clicked launch has no console. A command run from PowerShell or `cmd` attaches to that console; if there is no parent console, one is allocated. Redirected stdout and stderr (`> file`, `|`, and `2>`) are left alone, so a script can capture them. `AttachConsole` on 0.3.3 replaced those redirected handles and the text was written nowhere: `--version` and `--status` exited 0 with empty stdout, empty stderr, and no log line.
+
+Every command also writes `%LOCALAPPDATA%\uXa Launcher\cli-last.json`. `UXA_CLI_RESULT` overrides that path. The file is replaced atomically and is the stable result for automation:
+
+```json
+{
+  "command": "--status",
+  "ok": true,
+  "message": "Launcher: 0.3.3\nClient: not installed\nServer: Dolmar's Server\nServer version: v0.9.7.2\nServer online: yes",
+  "versions": { "launcher": "0.3.3", "client": null, "server": "v0.9.7.2" },
+  "timestamp": "2026-10-17T03:00:00Z",
+  "exitCode": 0
+}
+```
+
+`ok` is true only when `exitCode` is 0. `versions.client` and `versions.server` are null when that command did not learn them. The same line is appended to the launcher log under `%LOCALAPPDATA%\uXa\Launcher\logs`. The admin key and GitHub token are never written into the file or the log.
+
 ```powershell
 & "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --status
 & "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --update-client
@@ -39,7 +56,7 @@ The same `uxa-launcher.exe` accepts commands so a shell can deploy and patch wit
 & "$env:LOCALAPPDATA\uXa Launcher\uxa-launcher.exe" --help
 ```
 
-- `--status` prints the launcher version, the installed Friday Night Fights client version, and the selected server's version and whether it is online.
+- `--status` prints the launcher version, the installed Friday Night Fights client version, and the selected server's version and whether it is online. Those three versions are also `versions` in `cli-last.json`.
 - `--update-client` downloads and installs the latest Friday Night Fights client patch, the same way Play's patch step does, and does not start the game. It prints the installed version.
 - `--deploy-server <version>` deploys that server release tag to the selected server (Dolmar's Server unless Settings names another) through the uXa Server Agent. It waits until the agent finishes, then prints the agent's result and the running version.
 - With no flags, the launcher window opens.
@@ -173,6 +190,7 @@ Pushing `main`, pushing a `v*` tag, or running the workflow by hand runs `.githu
 - Grave March's build line, including a dead page that still allows play
 - a private-repo 404 that leaves an installed game playable
 - `--status`, `--update-client`, and `--deploy-server` leave `settings.json`, `servers.json`, the admin key, and the GitHub token byte-for-byte unchanged
+- a CLI result file records `command`, `ok`, `message`, `versions`, `timestamp`, and `exitCode`, redacts a GitHub token, and a redirected stdout handle is not replaced by the console attach
 - a launcher self-update, and a second install over the top of that exe, leave those same files unchanged
 
 The server-agent test deploys a mock `Server` + `Win64` zip, keeps `Saved` and `Config`, records the warning and `quit`, rejects a bad signature, rolls back a build that exits immediately, then restarts and stops the restored process. A config file that contains a secret is refused.
