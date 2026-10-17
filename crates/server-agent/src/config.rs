@@ -5,6 +5,56 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::schedule::{parse_clock, parse_zone};
+
+#[derive(Debug, Clone)]
+pub struct AutoUpdateConfig {
+    pub enabled: bool,
+    pub interval_hours: f64,
+    pub check_after_start_secs: u64,
+    pub check_times: Vec<String>,
+    pub server_enabled: bool,
+    pub agent_enabled: bool,
+    pub agent_owner: String,
+    pub agent_repo: String,
+    pub agent_asset: String,
+    pub restart_time: String,
+    pub restart_time_zone: String,
+    pub restart_window_minutes: u64,
+    pub daily_restart: bool,
+    pub keep_backups: u32,
+    pub grace_seconds: u64,
+}
+
+impl AutoUpdateConfig {
+    pub fn production() -> Self {
+        Self {
+            enabled: true,
+            interval_hours: 6.0,
+            check_after_start_secs: 30,
+            check_times: Vec::new(),
+            server_enabled: true,
+            agent_enabled: true,
+            agent_owner: "uXa-Sloppy".into(),
+            agent_repo: "uXa-Launcher".into(),
+            agent_asset: "uxa-server-agent.exe".into(),
+            restart_time: crate::schedule::DEFAULT_RESTART_TIME.into(),
+            restart_time_zone: crate::schedule::DEFAULT_TIME_ZONE.into(),
+            restart_window_minutes: 10,
+            daily_restart: true,
+            keep_backups: 7,
+            grace_seconds: 180,
+        }
+    }
+
+    /// Checks and restarts stay off. Paths and the clock still validate.
+    pub fn disabled() -> Self {
+        let mut config = Self::production();
+        config.enabled = false;
+        config
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub install_dir: PathBuf,
@@ -30,6 +80,7 @@ pub struct AgentConfig {
     pub work_dir: PathBuf,
     pub log_dir: PathBuf,
     pub secret: String,
+    pub auto_update: AutoUpdateConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +127,97 @@ struct FileConfig {
     work_dir: String,
     #[serde(default)]
     log_dir: String,
+    #[serde(default)]
+    auto_update: AutoUpdateFile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AutoUpdateFile {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_interval_hours")]
+    interval_hours: f64,
+    #[serde(default = "default_check_after")]
+    check_after_start_secs: u64,
+    #[serde(default)]
+    check_times: Vec<String>,
+    #[serde(default = "default_true")]
+    server_enabled: bool,
+    #[serde(default = "default_true")]
+    agent_enabled: bool,
+    #[serde(default = "default_agent_owner")]
+    agent_owner: String,
+    #[serde(default = "default_agent_repo")]
+    agent_repo: String,
+    #[serde(default = "default_agent_asset")]
+    agent_asset: String,
+    #[serde(default = "default_restart_time")]
+    restart_time: String,
+    #[serde(default = "default_restart_zone")]
+    restart_time_zone: String,
+    #[serde(default = "default_window")]
+    restart_window_minutes: u64,
+    #[serde(default = "default_true")]
+    daily_restart: bool,
+    #[serde(default = "default_keep_backups")]
+    keep_backups: u32,
+    #[serde(default = "default_grace")]
+    grace_seconds: u64,
+}
+
+fn default_interval_hours() -> f64 {
+    6.0
+}
+fn default_check_after() -> u64 {
+    30
+}
+fn default_agent_owner() -> String {
+    "uXa-Sloppy".into()
+}
+fn default_agent_repo() -> String {
+    "uXa-Launcher".into()
+}
+fn default_agent_asset() -> String {
+    "uxa-server-agent.exe".into()
+}
+fn default_restart_time() -> String {
+    "03:00".into()
+}
+fn default_restart_zone() -> String {
+    "America/New_York".into()
+}
+fn default_window() -> u64 {
+    10
+}
+fn default_keep_backups() -> u32 {
+    7
+}
+fn default_grace() -> u64 {
+    180
+}
+
+impl Default for AutoUpdateFile {
+    fn default() -> Self {
+        let base = AutoUpdateConfig::production();
+        Self {
+            enabled: base.enabled,
+            interval_hours: base.interval_hours,
+            check_after_start_secs: base.check_after_start_secs,
+            check_times: base.check_times,
+            server_enabled: base.server_enabled,
+            agent_enabled: base.agent_enabled,
+            agent_owner: base.agent_owner,
+            agent_repo: base.agent_repo,
+            agent_asset: base.agent_asset,
+            restart_time: base.restart_time,
+            restart_time_zone: base.restart_time_zone,
+            restart_window_minutes: base.restart_window_minutes,
+            daily_restart: base.daily_restart,
+            keep_backups: base.keep_backups,
+            grace_seconds: base.grace_seconds,
+        }
+    }
 }
 
 fn default_exe() -> String {
@@ -135,8 +277,18 @@ fn reject_embedded_secrets(text: &str) -> Result<(), String> {
     let obj = value
         .as_object()
         .ok_or_else(|| "agent config must be a JSON object".to_string())?;
-    for key in ["secret", "token", "githubToken", "github_token", "agentSecret", "password"] {
-        if obj.keys().any(|existing| existing.eq_ignore_ascii_case(key)) {
+    for key in [
+        "secret",
+        "token",
+        "githubToken",
+        "github_token",
+        "agentSecret",
+        "password",
+    ] {
+        if obj
+            .keys()
+            .any(|existing| existing.eq_ignore_ascii_case(key))
+        {
             return Err(format!(
                 "Refusing to start: agent config contains \"{key}\". Put the admin key in UXA_AGENT_SECRET or agent.secret, and a GitHub token in UXA_GITHUB_TOKEN."
             ));
@@ -149,7 +301,10 @@ fn config_path() -> Result<PathBuf, String> {
     if let Some(path) = env_nonempty("UXA_AGENT_CONFIG") {
         let path = PathBuf::from(path);
         if !path.is_file() {
-            return Err(format!("UXA_AGENT_CONFIG does not exist: {}", path.display()));
+            return Err(format!(
+                "UXA_AGENT_CONFIG does not exist: {}",
+                path.display()
+            ));
         }
         return Ok(path);
     }
@@ -209,10 +364,11 @@ fn load_secret(config_path: &Path) -> Result<String, String> {
 
 pub fn load_config() -> Result<AgentConfig, String> {
     let path = config_path()?;
-    let text = fs::read_to_string(&path).map_err(|err| format!("Could not read {}: {err}", path.display()))?;
+    let text = fs::read_to_string(&path)
+        .map_err(|err| format!("Could not read {}: {err}", path.display()))?;
     reject_embedded_secrets(&text)?;
-    let file: FileConfig = serde_json::from_str(&text)
-        .map_err(|err| format!("{}: {err}", path.display()))?;
+    let file: FileConfig =
+        serde_json::from_str(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     let secret = load_secret(&path)?;
     let mut config = file.into_config(secret)?;
     if let Some(value) = env_nonempty("UXA_AGENT_INSTALL") {
@@ -284,7 +440,29 @@ impl FileConfig {
             work_dir: PathBuf::from(self.work_dir.trim()),
             log_dir: PathBuf::from(self.log_dir.trim()),
             secret,
+            auto_update: map_auto(self.auto_update),
         })
+    }
+}
+
+fn map_auto(file: AutoUpdateFile) -> AutoUpdateConfig {
+    let base = AutoUpdateConfig::production();
+    AutoUpdateConfig {
+        enabled: file.enabled,
+        interval_hours: file.interval_hours,
+        check_after_start_secs: file.check_after_start_secs,
+        check_times: file.check_times,
+        server_enabled: file.server_enabled,
+        agent_enabled: file.agent_enabled,
+        agent_owner: nonempty(file.agent_owner, base.agent_owner),
+        agent_repo: nonempty(file.agent_repo, base.agent_repo),
+        agent_asset: nonempty(file.agent_asset, base.agent_asset),
+        restart_time: nonempty(file.restart_time, base.restart_time),
+        restart_time_zone: nonempty(file.restart_time_zone, base.restart_time_zone),
+        restart_window_minutes: file.restart_window_minutes,
+        daily_restart: file.daily_restart,
+        keep_backups: file.keep_backups,
+        grace_seconds: file.grace_seconds,
     }
 }
 
@@ -304,10 +482,11 @@ impl AgentConfig {
         }
         self.secret = self.secret.trim().to_string();
         if self.work_dir.as_os_str().is_empty() {
-            let parent = self.install_dir.parent().filter(|p| !p.as_os_str().is_empty());
-            self.work_dir = parent
-                .unwrap_or(Path::new("."))
-                .join(".uxa-agent");
+            let parent = self
+                .install_dir
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty());
+            self.work_dir = parent.unwrap_or(Path::new(".")).join(".uxa-agent");
         }
         if self.backup_dir.as_os_str().is_empty() {
             self.backup_dir = self.work_dir.join("backups");
@@ -319,6 +498,33 @@ impl AgentConfig {
         let key_set = !self.tls_key.as_os_str().is_empty();
         if cert_set != key_set {
             return Err("Set both tlsCert and tlsKey, or leave both empty.".into());
+        }
+        if !self.auto_update.interval_hours.is_finite() || self.auto_update.interval_hours < 0.0 {
+            return Err(
+                "autoUpdate.intervalHours must be a number that is zero or greater.".into(),
+            );
+        }
+        if self.auto_update.restart_window_minutes == 0
+            || self.auto_update.restart_window_minutes > 24 * 60
+        {
+            return Err(
+                "autoUpdate.restartWindowMinutes must be between 1 and 1440. The default is 10."
+                    .into(),
+            );
+        }
+        parse_zone(&self.auto_update.restart_time_zone)?;
+        if parse_clock(&self.auto_update.restart_time).is_none() {
+            return Err(format!(
+                "autoUpdate.restartTime must be HH:MM, got {}.",
+                self.auto_update.restart_time
+            ));
+        }
+        for entry in &self.auto_update.check_times {
+            if parse_clock(entry).is_none() {
+                return Err(format!(
+                    "autoUpdate.checkTimes entries must be HH:MM, got {entry}."
+                ));
+            }
         }
         Ok(())
     }

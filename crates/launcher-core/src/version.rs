@@ -160,13 +160,40 @@ mod tests {
     }
 
     #[test]
+    fn four_part_suffix_orders_above_0_9_6() {
+        let suffixed = "v0.9.7.2-build18g";
+        let parsed = parse_version(suffixed).unwrap();
+        assert_eq!(parsed.to_string(), "0.9.7.2-build18g");
+        assert_eq!(parsed.pre(), Some("build18g"));
+        assert_eq!(parse_version("v0.9.7.2").unwrap().to_string(), "0.9.7.2");
+        assert!(parsed.parts().len() == 4);
+        assert!(is_newer("v0.9.7.2", Some("0.9.6")).unwrap());
+        assert!(is_newer("v0.9.7.2", Some("v0.9.6.1")).unwrap());
+        assert!(is_newer(suffixed, Some("0.9.6")).unwrap());
+        assert!(is_newer(suffixed, Some("v0.9.6.1")).unwrap());
+        assert!(is_newer(suffixed, Some("v0.9.7.1")).unwrap());
+        assert!(is_newer("v0.9.7.2", Some(suffixed)).unwrap());
+        assert!(!is_newer(suffixed, Some("v0.9.7.2")).unwrap());
+        assert!(!is_newer("v0.9.6.1", Some(suffixed)).unwrap());
+        assert!(is_newer("v0.9.7.2-rc.1", Some("0.9.6.1")).unwrap());
+    }
+
+    #[test]
     fn prerelease_and_embedded_tags() {
         assert!(is_newer("0.9.6.1", Some("0.9.6.1-rc.2")).unwrap());
         assert!(is_newer("0.9.6.1-rc.10", Some("0.9.6.1-rc.2")).unwrap());
-        assert_eq!(parse_version("FNF 0.9.6.1 (pre-alpha hotfix)").unwrap().to_string(), "0.9.6.1");
+        assert_eq!(
+            parse_version("FNF 0.9.6.1 (pre-alpha hotfix)")
+                .unwrap()
+                .to_string(),
+            "0.9.6.1"
+        );
         assert_eq!(parse_version("v0.9.4-ds1").unwrap().pre(), Some("ds1"));
         assert_eq!(parse_version("0.9.6+build.7").unwrap().to_string(), "0.9.6");
-        assert!(parse_version("v1.2.3.4.5").is_none() || parse_version("v1.2.3.4.5").unwrap().parts().len() <= 4);
+        assert!(
+            parse_version("v1.2.3.4.5").is_none()
+                || parse_version("v1.2.3.4.5").unwrap().parts().len() <= 4
+        );
     }
 
     #[test]

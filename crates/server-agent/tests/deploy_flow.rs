@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use launcher_core::{agent_exchange, sign_request, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus};
-use uxa_server_agent::{serve_listener, Agent, AgentConfig};
+use launcher_core::{
+    agent_exchange, sign_request, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus,
+};
+use uxa_server_agent::{serve_listener, Agent, AgentConfig, AutoUpdateConfig};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -76,7 +78,10 @@ fn start_remote(remote: Remote) -> String {
             drop(remote);
             let response = tiny_http::Response::from_data(body)
                 .with_status_code(status)
-                .with_header(tiny_http::Header::from_bytes(b"Content-Type", content_type.as_bytes()).unwrap());
+                .with_header(
+                    tiny_http::Header::from_bytes(b"Content-Type", content_type.as_bytes())
+                        .unwrap(),
+                );
             let _ = request.respond(response);
         }
     });
@@ -153,6 +158,7 @@ fn test_config(root: &Path, api: &str, listen: &str) -> AgentConfig {
         work_dir: root.join("work"),
         log_dir: root.join("logs"),
         secret: "test-secret-not-for-production".into(),
+        auto_update: AutoUpdateConfig::disabled(),
     };
     config.finish_paths().unwrap();
     config
@@ -263,10 +269,15 @@ async fn deploy_preserves_saves_and_rolls_back() {
     fs::create_dir_all(install.join("Config")).unwrap();
     fs::write(install.join("Config/ServerSettings.ini"), b"TickRate=30").unwrap();
 
-    let releases: Vec<AgentReleaseSummary> =
-        serde_json::from_str(&call(&http, &base, &secret, "GET", "/v1/releases", b"").await.unwrap())
-            .unwrap();
-    assert!(releases.iter().any(|r| r.tag == "v1.2.0" && r.asset_name.contains("Server")));
+    let releases: Vec<AgentReleaseSummary> = serde_json::from_str(
+        &call(&http, &base, &secret, "GET", "/v1/releases", b"")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(releases
+        .iter()
+        .any(|r| r.tag == "v1.2.0" && r.asset_name.contains("Server")));
     assert!(releases.iter().all(|r| !r.asset_name.contains("Client")));
     assert!(releases.iter().any(|r| r.tag == "v9.9.9-broken"));
 
@@ -282,11 +293,17 @@ async fn deploy_preserves_saves_and_rolls_back() {
     let err = broken.expect_err("broken build must fail the deploy");
     assert!(err.contains("Previous build restored"), "{err}");
 
-    let status: AgentStatus =
-        serde_json::from_str(&call(&http, &base, &secret, "GET", "/v1/status", b"").await.unwrap())
-            .unwrap();
+    let status: AgentStatus = serde_json::from_str(
+        &call(&http, &base, &secret, "GET", "/v1/status", b"")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(status.version, "v1.2.0");
-    assert!(status.online, "previous build should be running after rollback");
+    assert!(
+        status.online,
+        "previous build should be running after rollback"
+    );
     assert_eq!(
         fs::read(install.join("Saved/Worlds/island.sav")).unwrap(),
         b"WORLD"
@@ -321,12 +338,18 @@ async fn deploy_preserves_saves_and_rolls_back() {
     assert_eq!(stopped.status.version, "v1.2.0");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let logs: serde_json::Value =
-        serde_json::from_str(&call(&http, &base, &secret, "GET", "/v1/logs?after=0", b"").await.unwrap())
-            .unwrap();
-    let lines: Vec<AgentLogLine> =
-        serde_json::from_value(logs.get("lines").cloned().unwrap_or(serde_json::Value::Null))
-            .unwrap_or_default();
+    let logs: serde_json::Value = serde_json::from_str(
+        &call(&http, &base, &secret, "GET", "/v1/logs?after=0", b"")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let lines: Vec<AgentLogLine> = serde_json::from_value(
+        logs.get("lines")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )
+    .unwrap_or_default();
     let text = lines
         .iter()
         .map(|line| line.message.as_str())
@@ -338,19 +361,69 @@ async fn deploy_preserves_saves_and_rolls_back() {
     assert!(text.contains("rejected"), "{text}");
 }
 
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
 #[test]
 fn config_refuses_a_secret_in_json() {
+    let _lock = env_lock();
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("agent.json");
-    fs::write(
-        &path,
-        r#"{"installDir":"C:\\Games\\FNF","secret":"nope"}"#,
-    )
-    .unwrap();
+    fs::write(&path, r#"{"installDir":"C:\\Games\\FNF","secret":"nope"}"#).unwrap();
     std::env::set_var("UXA_AGENT_CONFIG", &path);
     std::env::set_var("UXA_AGENT_SECRET", "from-env");
     let err = uxa_server_agent::load_config().expect_err("secret in json must be refused");
     assert!(err.contains("secret"), "{err}");
+    std::env::remove_var("UXA_AGENT_CONFIG");
+    std::env::remove_var("UXA_AGENT_SECRET");
+}
+
+#[test]
+fn missing_auto_update_uses_a_six_hour_check_and_three_am_eastern() {
+    let _lock = env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("agent.json");
+    fs::write(
+        &path,
+        r#"{"installDir":"C:\\uXa\\FridayNightFightsServer","listen":"127.0.0.1:9"}"#,
+    )
+    .unwrap();
+    std::env::set_var("UXA_AGENT_CONFIG", &path);
+    std::env::set_var("UXA_AGENT_SECRET", "from-env");
+    let config = uxa_server_agent::load_config().expect("defaults should load");
+    assert!(config.auto_update.enabled);
+    assert_eq!(config.auto_update.interval_hours, 6.0);
+    assert_eq!(config.auto_update.restart_time, "03:00");
+    assert_eq!(config.auto_update.restart_time_zone, "America/New_York");
+    assert!(config.auto_update.daily_restart);
+    assert!(config.auto_update.server_enabled);
+    assert!(config.auto_update.agent_enabled);
+    assert_eq!(config.auto_update.restart_window_minutes, 10);
+    assert_eq!(config.auto_update.keep_backups, 7);
+    assert_eq!(config.auto_update.grace_seconds, 180);
+    std::env::remove_var("UXA_AGENT_CONFIG");
+    std::env::remove_var("UXA_AGENT_SECRET");
+}
+
+#[test]
+fn config_rejects_a_zone_abbreviation() {
+    let _lock = env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("agent.json");
+    fs::write(
+        &path,
+        r#"{"installDir":"C:\\uXa\\FridayNightFightsServer","autoUpdate":{"restartTimeZone":"EST"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("UXA_AGENT_CONFIG", &path);
+    std::env::set_var("UXA_AGENT_SECRET", "from-env");
+    let err = uxa_server_agent::load_config().expect_err("EST is not an IANA zone");
+    assert!(
+        err.contains("time zone") || err.contains("America/New_York"),
+        "{err}"
+    );
     std::env::remove_var("UXA_AGENT_CONFIG");
     std::env::remove_var("UXA_AGENT_SECRET");
 }

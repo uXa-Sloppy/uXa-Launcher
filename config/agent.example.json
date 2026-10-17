@@ -19,5 +19,22 @@
   "tlsKey": "",
   "backupDir": "",
   "workDir": "",
-  "logDir": ""
+  "logDir": "",
+  "autoUpdate": {
+    "enabled": true,
+    "intervalHours": 6,
+    "checkAfterStartSecs": 30,
+    "checkTimes": [],
+    "serverEnabled": true,
+    "agentEnabled": true,
+    "agentOwner": "uXa-Sloppy",
+    "agentRepo": "uXa-Launcher",
+    "agentAsset": "uxa-server-agent.exe",
+    "restartTime": "03:00",
+    "restartTimeZone": "America/New_York",
+    "restartWindowMinutes": 10,
+    "dailyRestart": true,
+    "keepBackups": 7,
+    "graceSeconds": 180
+  }
 }
