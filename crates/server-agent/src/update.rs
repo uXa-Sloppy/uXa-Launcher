@@ -411,6 +411,10 @@ impl Agent {
         let downloads = self.config.work_dir.join("downloads");
         fs::create_dir_all(&downloads).map_err(|err| err.to_string())?;
         let exe_path = downloads.join(asset_name);
+        // Never resume from a file left by an older update: same-size leftovers would be
+        // treated as complete and fail (or worse, pass) verification.
+        let _ = fs::remove_file(&exe_path);
+        let _ = fs::remove_file(downloads.join(CHECKSUM_ASSET));
         let url = download_url(asset)
             .map_err(|err| err.to_string())?
             .to_string();

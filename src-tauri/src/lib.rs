@@ -1184,6 +1184,13 @@ async fn admin_restart(
 }
 
 #[tauri::command]
+async fn admin_wipe(state: State<'_, AppState>, server_id: String) -> Result<AgentAction, String> {
+    tracing::warn!(server = %server_id, "admin wipe");
+    let body = agent_call(&state, &server_id, "POST", "/v1/wipe", br#"{"confirm":"WIPE"}"#).await?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn admin_stop(state: State<'_, AppState>, server_id: String) -> Result<AgentAction, String> {
     tracing::info!(server = %server_id, "admin stop");
     let body = agent_call(&state, &server_id, "POST", "/v1/stop", b"").await?;
@@ -1252,7 +1259,8 @@ pub fn run() {
             admin_logs,
             admin_deploy,
             admin_restart,
-            admin_stop
+            admin_stop,
+            admin_wipe
         ])
         .run(tauri::generate_context!())
         .expect("error while running uXa Launcher");

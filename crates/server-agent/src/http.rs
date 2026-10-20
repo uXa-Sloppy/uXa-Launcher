@@ -18,6 +18,12 @@ use tokio::net::TcpListener;
 use crate::runtime::Agent;
 
 #[derive(Deserialize)]
+struct WipeBody {
+    #[serde(default)]
+    confirm: String,
+}
+
+#[derive(Deserialize)]
 struct DeployBody {
     #[serde(default)]
     tag: String,
@@ -111,6 +117,21 @@ async fn dispatch(
                 status,
             })
         }),
+        ("POST", "/v1/wipe") => {
+            let ok = serde_json::from_slice::<WipeBody>(&body)
+                .map(|b| b.confirm == "WIPE")
+                .unwrap_or(false);
+            if !ok {
+                return json_error(StatusCode::BAD_REQUEST, "Wipe needs {\"confirm\":\"WIPE\"}.");
+            }
+            agent.wipe().await.map(|status| {
+                Reply::Action(AgentAction {
+                    ok: true,
+                    message: "Saves wiped (backup kept) and the server restarted.".into(),
+                    status,
+                })
+            })
+        }
         ("POST", "/v1/stop") => agent.stop().await.map(|status| {
             Reply::Action(AgentAction {
                 ok: true,
@@ -120,7 +141,7 @@ async fn dispatch(
         }),
         (
             "GET" | "POST",
-            "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop",
+            "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe",
         ) => {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.");
         }

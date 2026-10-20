@@ -464,6 +464,11 @@ where
                 ));
             }
             let sums_path = download_dir.join(CHECKSUM_ASSET);
+            // A SHA256SUMS.txt left from an older update has the same size and would be
+            // "resumed" as complete, then disagree with the new digest. Always fetch it fresh.
+            if sums_path.exists() {
+                let _ = fs::remove_file(&sums_path);
+            }
             download_with_resume(
                 DownloadRequest {
                     client,

@@ -301,6 +301,73 @@ impl Agent {
         }
     }
 
+    /// Wipe: graceful quit (then kill), back up every Saved tree, remove each Saved/SaveGames
+    /// (Config and the rest of Saved stay), start the server again. Nothing is removed unless
+    /// the backup succeeded.
+    pub async fn wipe(&self) -> Result<AgentStatus, Fail> {
+        let _guard = self.begin_real()?;
+        self.log("wipe requested");
+        let result = self.wipe_inner().await;
+        self.set_phase("idle");
+        match result {
+            Ok(()) => {
+                let status = self.status().await;
+                self.log(format!("wipe finished online={}", status.online));
+                Ok(status)
+            }
+            Err(err) => {
+                self.log(format!("wipe failed: {}", err.message));
+                Err(err)
+            }
+        }
+    }
+
+    async fn wipe_inner(&self) -> Result<(), Fail> {
+        if !self.config.install_dir.exists() {
+            return Err(Fail::msg(404, "No server is installed; nothing to wipe."));
+        }
+        self.set_phase("stopping");
+        self.stop_running(true).await?;
+        self.log("wipe: server stopped");
+        self.set_phase("backing-up");
+        match backup_saved(&self.config.install_dir, &self.config.backup_dir) {
+            Ok(Some(path)) => self.log(format!("wipe: backed up Saved to {}", path.display())),
+            Ok(None) => self.log("wipe: no Saved folder to back up"),
+            Err(err) => {
+                self.log(format!("wipe: backup failed ({err}); nothing was deleted, restarting"));
+                let _ = self.start_installed().await;
+                return Err(Fail::msg(
+                    500,
+                    format!("Save backup failed: {err}. Nothing was wiped; the server was restarted."),
+                ));
+            }
+        }
+        self.set_phase("wiping");
+        let removed = wipe_save_games(&self.config.install_dir).map_err(|err| {
+            Fail::msg(500, format!("wipe: could not clear SaveGames: {err}"))
+        });
+        match removed {
+            Ok(list) if list.is_empty() => self.log("wipe: no SaveGames folder found"),
+            Ok(list) => {
+                for path in list {
+                    self.log(format!("wipe: cleared {}", path.display()));
+                }
+            }
+            Err(err) => {
+                self.log(&err.message);
+                let _ = self.start_installed().await;
+                return Err(err);
+            }
+        }
+        self.set_phase("starting");
+        self.start_installed().await?;
+        self.log("wipe: server started");
+        self.health_check()
+            .await
+            .map_err(|err| Fail::msg(500, format!("Wiped, but the restart failed its health check: {err}")))?;
+        Ok(())
+    }
+
     /// The atomic flag is the real lock. BusyGuard only exists so the HTTP layer
     /// can share the type; `begin_real` clears it when the action returns.
     pub(crate) fn begin_real(&self) -> Result<ActionGuard<'_>, Fail> {
@@ -1007,6 +1074,21 @@ fn backup_saved(install: &Path, backup_root: &Path) -> Result<Option<PathBuf>, S
     Ok(Some(dest))
 }
 
+/// Remove `SaveGames` under every Saved tree of the install. Config and logs stay.
+fn wipe_save_games(install: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut removed = Vec::new();
+    for rel in launcher_core::resolve_preserved(install, Path::new("Saved")) {
+        let saved = install.join(&rel);
+        let games = saved.join("SaveGames");
+        if games.is_dir() {
+            fs::remove_dir_all(&games).map_err(|err| format!("{}: {err}", games.display()))?;
+            fs::create_dir_all(&games).map_err(|err| err.to_string())?;
+            removed.push(games);
+        }
+    }
+    Ok(removed)
+}
+
 fn locate_executable(install: &Path, name: &str) -> Option<PathBuf> {
     let direct = install.join(name);
     if direct.is_file() {
@@ -1360,6 +1442,24 @@ mod preserve_tests {
             fs::read(install.join("FridayNightFights/Saved/world.sav")).unwrap(),
             b"WORLD"
         );
+    }
+
+    #[test]
+    fn wipe_clears_save_games_and_keeps_config() {
+        let root = std::env::temp_dir().join(format!("uxa-wipe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sg = root.join("FridayNightFights/Saved/SaveGames");
+        fs::create_dir_all(&sg).unwrap();
+        fs::write(sg.join("FNF_Account.sav"), b"acct").unwrap();
+        let cfg = root.join("FridayNightFights/Saved/Config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(cfg.join("Game.ini"), b"cfg").unwrap();
+        let removed = wipe_save_games(&root).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(sg.is_dir());
+        assert!(!sg.join("FNF_Account.sav").exists());
+        assert!(cfg.join("Game.ini").is_file());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -42,6 +42,7 @@ export interface LauncherApi {
   adminDeploy(serverId: string, tag: string): Promise<AgentAction>;
   adminRestart(serverId: string): Promise<AgentAction>;
   adminStop(serverId: string): Promise<AgentAction>;
+  adminWipe(serverId: string): Promise<AgentAction>;
 }
 
 const tauriApi: LauncherApi = {
@@ -78,6 +79,7 @@ const tauriApi: LauncherApi = {
   adminDeploy: (serverId, tag) => invoke<AgentAction>("admin_deploy", { serverId, tag }),
   adminRestart: (serverId) => invoke<AgentAction>("admin_restart", { serverId }),
   adminStop: (serverId) => invoke<AgentAction>("admin_stop", { serverId }),
+  adminWipe: (serverId) => invoke<AgentAction>("admin_wipe", { serverId }),
 };
 
 const previewGames: Bootstrap["games"] = [
@@ -323,6 +325,15 @@ const previewApi: LauncherApi = {
     previewAdmin.phase = "idle";
     previewLog("stop finished");
     return { ok: true, message: "Server stopped.", status: previewStatus() };
+  },
+  async adminWipe() {
+    previewLog("wipe requested");
+    previewLog("wipe: backed up Saved");
+    previewLog("wipe: cleared SaveGames");
+    previewAdmin.online = true;
+    previewAdmin.started = Date.now();
+    previewLog("wipe finished online=true");
+    return { ok: true, message: "Saves wiped (backup kept) and the server restarted.", status: previewStatus() };
   },
 };
 

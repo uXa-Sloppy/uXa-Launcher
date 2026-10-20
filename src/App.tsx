@@ -548,7 +548,8 @@ function AdminDialog({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<null | "deploy" | "restart" | "stop">(null);
+  const [confirm, setConfirm] = useState<null | "deploy" | "restart" | "stop" | "wipe">(null);
+  const [wipeText, setWipeText] = useState("");
   const after = useRef(0);
 
   const server = servers.find((entry) => entry.id === serverId) ?? servers[0];
@@ -593,7 +594,7 @@ function AdminDialog({
     };
   }, [open, activeId, refresh]);
 
-  async function run(action: "deploy" | "restart" | "stop") {
+  async function run(action: "deploy" | "restart" | "stop" | "wipe") {
     if (!server) return;
     setConfirm(null);
     setBusy(true);
@@ -604,7 +605,9 @@ function AdminDialog({
         ? await api.adminDeploy(server.id, tag)
         : action === "restart"
           ? await api.adminRestart(server.id)
-          : await api.adminStop(server.id);
+          : action === "wipe"
+            ? await api.adminWipe(server.id)
+            : await api.adminStop(server.id);
       setStatus(result.status);
       setNotice(result.message);
       await refresh();
@@ -620,7 +623,9 @@ function AdminDialog({
     ? `Deploy ${tag || "the selected build"} to ${server?.name ?? "this server"}? Players get a warning, world saves are backed up, then the server restarts. If the new build does not stay up, the previous build is restored.`
     : confirm === "restart"
       ? `Restart ${server?.name ?? "this server"} on the current build? Players get a warning first.`
-      : `Stop ${server?.name ?? "this server"}? Players get a warning, then the process exits.`;
+      : confirm === "wipe"
+        ? `Wipe all saves on ${server?.name ?? "this server"}? Players get a warning, the server stops, Saved is backed up on the server machine, then every account, character and guild save is deleted and the server restarts. Type WIPE to confirm.`
+        : `Stop ${server?.name ?? "this server"}? Players get a warning, then the process exits.`;
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -684,6 +689,9 @@ function AdminDialog({
                 <button type="button" className="btn danger" disabled={busy} onClick={() => setConfirm("stop")}>
                   Stop
                 </button>
+                <button type="button" className="btn danger" disabled={busy} onClick={() => { setWipeText(""); setConfirm("wipe"); }}>
+                  Wipe saves
+                </button>
               </div>
               <pre className="admin-log" aria-live="polite">
                 {logs.length === 0 ? "Waiting for agent log…" : logs.map((line) => `${line.at}  ${line.message}`).join("\n")}
@@ -701,14 +709,21 @@ function AdminDialog({
               <Dialog.Content className="dialog">
                 <Dialog.Title asChild><h2>Confirm</h2></Dialog.Title>
                 <Dialog.Description>{confirmCopy}</Dialog.Description>
+                {confirm === "wipe" && (
+                  <label className="field">
+                    <span>Type WIPE</span>
+                    <input aria-label="Type WIPE to confirm" value={wipeText} onChange={(event) => setWipeText(event.target.value)} autoFocus />
+                  </label>
+                )}
                 <div className="dialog-actions">
                   <button type="button" className="btn" onClick={() => setConfirm(null)}>Cancel</button>
                   <button
                     type="button"
-                    className={confirm === "stop" ? "btn danger" : "btn primary"}
+                    className={confirm === "stop" || confirm === "wipe" ? "btn danger" : "btn primary"}
+                    disabled={confirm === "wipe" && wipeText !== "WIPE"}
                     onClick={() => { if (confirm) void run(confirm); }}
                   >
-                    {confirm === "deploy" ? "Deploy" : confirm === "restart" ? "Restart" : "Stop"}
+                    {confirm === "deploy" ? "Deploy" : confirm === "restart" ? "Restart" : confirm === "wipe" ? "Wipe saves" : "Stop"}
                   </button>
                 </div>
               </Dialog.Content>
