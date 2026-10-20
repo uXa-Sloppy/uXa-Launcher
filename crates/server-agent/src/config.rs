@@ -233,7 +233,7 @@ fn default_owner() -> String {
     "uXa-Sloppy".into()
 }
 fn default_repo() -> String {
-    "FridayNightFights".into()
+    "FridayNightFights-Releases".into()
 }
 fn default_contains() -> Vec<String> {
     vec!["Server".into(), "Win64".into()]

@@ -5,7 +5,7 @@
   "args": ["-log"],
   "preserve": ["Saved", "Config"],
   "owner": "uXa-Sloppy",
-  "repo": "FridayNightFights",
+  "repo": "FridayNightFights-Releases",
   "assetContains": ["Server", "Win64"],
   "assetPattern": "",
   "includePrereleases": true,

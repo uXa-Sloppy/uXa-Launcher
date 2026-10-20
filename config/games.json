@@ -1,8 +1,8 @@
 {
   "newsUrl": "",
   "launcher": {
-    "version": "0.3.6",
-    "displayVersion": "v0.3.6",
+    "version": "0.3.7",
+    "displayVersion": "v0.3.7",
     "updateOwner": "uXa-Sloppy",
     "updateRepo": "uXa-Launcher"
   },
@@ -21,7 +21,7 @@
       "source": {
         "type": "github-release",
         "owner": "uXa-Sloppy",
-        "repo": "FridayNightFights",
+        "repo": "FridayNightFights-Releases",
         "assetContains": ["Client", "Win64"],
         "assetPattern": "",
         "includePrereleases": true
