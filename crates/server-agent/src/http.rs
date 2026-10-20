@@ -89,6 +89,9 @@ async fn dispatch(
     let result = match (method.as_str(), path) {
         ("GET", "/v1/status") => Ok(Reply::Status(agent.status().await)),
         ("GET", "/v1/releases") => agent.releases().await.map(Reply::Releases),
+        ("GET", "/v1/serverlog") => {
+            return axum::Json(agent.server_log()).into_response();
+        }
         ("GET", "/v1/logs") => {
             let after = query_u64(&uri, "after");
             Ok(Reply::Logs(agent.logs_after(after)))
@@ -141,7 +144,7 @@ async fn dispatch(
         }),
         (
             "GET" | "POST",
-            "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe",
+            "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe" | "/v1/serverlog",
         ) => {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.");
         }

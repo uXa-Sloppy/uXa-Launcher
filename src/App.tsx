@@ -550,6 +550,7 @@ function AdminDialog({
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<null | "deploy" | "restart" | "stop" | "wipe">(null);
   const [wipeText, setWipeText] = useState("");
+  const [serverLog, setServerLog] = useState("");
   const after = useRef(0);
 
   const server = servers.find((entry) => entry.id === serverId) ?? servers[0];
@@ -616,6 +617,25 @@ function AdminDialog({
       await refresh();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function viewServerLog() {
+    if (!server) return;
+    setError("");
+    try {
+      const raw = await api.adminServerLog(server.id);
+      type LogFile = { file: string; modified: string; tail: string };
+      type Crash = { name: string; modified: string; logTail: string };
+      const data = JSON.parse(raw) as { logs?: LogFile[]; crashes?: Crash[] };
+      const parts: string[] = [];
+      const crashes = data.crashes ?? [];
+      parts.push(crashes.length === 0 ? "Crashes: none" : `Crashes (${crashes.length}, newest first):\n` + crashes.map((c) => `  ${c.modified}  ${c.name}`).join("\n"));
+      if (crashes[0]?.logTail) parts.push(`--- newest crash log tail (${crashes[0].name}) ---\n${crashes[0].logTail}`);
+      for (const log of data.logs ?? []) parts.push(`--- ${log.file} (${log.modified}) ---\n${log.tail}`);
+      setServerLog(parts.join("\n\n"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -692,7 +712,13 @@ function AdminDialog({
                 <button type="button" className="btn danger" disabled={busy} onClick={() => { setWipeText(""); setConfirm("wipe"); }}>
                   Wipe saves
                 </button>
+                <button type="button" className="btn" onClick={() => void viewServerLog()}>
+                  View server log
+                </button>
               </div>
+              {serverLog && (
+                <pre className="admin-log" aria-label="Server log">{serverLog}</pre>
+              )}
               <pre className="admin-log" aria-live="polite">
                 {logs.length === 0 ? "Waiting for agent log…" : logs.map((line) => `${line.at}  ${line.message}`).join("\n")}
               </pre>

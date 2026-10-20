@@ -301,6 +301,39 @@ impl Agent {
         }
     }
 
+    /// Newest game-server log tails (Unreal Saved/Logs and the agent's stdout capture)
+    /// plus the crash folders under Saved/Crashes, newest first. Read-only.
+    pub fn server_log(&self) -> serde_json::Value {
+        let install = &self.config.install_dir;
+        let mut logs = Vec::new();
+        let mut crashes = Vec::new();
+        for rel in launcher_core::resolve_preserved(install, Path::new("Saved")) {
+            let saved = install.join(&rel);
+            if let Some(file) = newest_file(&saved.join("Logs"), Some("log")) {
+                logs.push(log_entry(&file, 300));
+            }
+            if let Ok(dir) = fs::read_dir(saved.join("Crashes")) {
+                let mut found: Vec<_> = dir.flatten().filter(|e| e.path().is_dir()).collect();
+                found.sort_by_key(|e| std::cmp::Reverse(modified(&e.path())));
+                for entry in found.into_iter().take(10) {
+                    let path = entry.path();
+                    let tail = newest_file(&path, Some("log"))
+                        .map(|f| tail_lines(&f, 60))
+                        .unwrap_or_default();
+                    crashes.push(serde_json::json!({
+                        "name": entry.file_name().to_string_lossy(),
+                        "modified": stamp_of(&path),
+                        "logTail": tail,
+                    }));
+                }
+            }
+        }
+        if let Some(file) = newest_file(&self.config.log_dir, None) {
+            logs.push(log_entry(&file, 200));
+        }
+        serde_json::json!({ "logs": logs, "crashes": crashes })
+    }
+
     /// Wipe: graceful quit (then kill), back up every Saved tree, remove each Saved/SaveGames
     /// (Config and the rest of Saved stay), start the server again. Nothing is removed unless
     /// the backup succeeded.
@@ -1072,6 +1105,45 @@ fn backup_saved(install: &Path, backup_root: &Path) -> Result<Option<PathBuf>, S
     fs::create_dir_all(&dest).map_err(|err| err.to_string())?;
     copy_preserved(install, &dest, &["Saved".into()]).map_err(|err| err.to_string())?;
     Ok(Some(dest))
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH)
+}
+
+fn stamp_of(path: &Path) -> String {
+    chrono::DateTime::<chrono::Utc>::from(modified(path)).to_rfc3339()
+}
+
+fn newest_file(dir: &Path, ext: Option<&str>) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| ext.map_or(true, |x| p.extension().map_or(false, |e| e.eq_ignore_ascii_case(x))))
+        .max_by_key(|p| modified(p))
+}
+
+fn tail_lines(path: &Path, lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(path) else { return String::new() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(256 * 1024);
+    let _ = file.seek(SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    let _ = file.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
+fn log_entry(path: &Path, lines: usize) -> serde_json::Value {
+    serde_json::json!({
+        "file": path.display().to_string(),
+        "modified": stamp_of(path),
+        "tail": tail_lines(path, lines),
+    })
 }
 
 /// Remove `SaveGames` under every Saved tree of the install. Config and logs stay.

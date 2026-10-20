@@ -43,6 +43,7 @@ export interface LauncherApi {
   adminRestart(serverId: string): Promise<AgentAction>;
   adminStop(serverId: string): Promise<AgentAction>;
   adminWipe(serverId: string): Promise<AgentAction>;
+  adminServerLog(serverId: string): Promise<string>;
 }
 
 const tauriApi: LauncherApi = {
@@ -80,6 +81,7 @@ const tauriApi: LauncherApi = {
   adminRestart: (serverId) => invoke<AgentAction>("admin_restart", { serverId }),
   adminStop: (serverId) => invoke<AgentAction>("admin_stop", { serverId }),
   adminWipe: (serverId) => invoke<AgentAction>("admin_wipe", { serverId }),
+  adminServerLog: (serverId) => invoke<string>("admin_server_log", { serverId }),
 };
 
 const previewGames: Bootstrap["games"] = [
@@ -325,6 +327,9 @@ const previewApi: LauncherApi = {
     previewAdmin.phase = "idle";
     previewLog("stop finished");
     return { ok: true, message: "Server stopped.", status: previewStatus() };
+  },
+  async adminServerLog() {
+    return JSON.stringify({ logs: [{ file: "FridayNightFights.log", modified: "", tail: "LogInit: preview" }], crashes: [] });
   },
   async adminWipe() {
     previewLog("wipe requested");
