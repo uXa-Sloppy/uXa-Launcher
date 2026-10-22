@@ -199,6 +199,7 @@ pub async fn list_matching_releases(
             }) {
                 found.push(into_release(release, asset));
                 if found.len() >= 40 {
+                    sort_newest_first(&mut found);
                     return Ok(found);
                 }
             }
@@ -208,7 +209,22 @@ pub async fn list_matching_releases(
             None => break,
         }
     }
+    sort_newest_first(&mut found);
     Ok(found)
+}
+
+/// Newest version first, whatever order GitHub returned. Two releases on the same commit come back
+/// in no fixed order, so the updater must not trust list order. Tags that do not parse keep their
+/// GitHub order after every parsed one (stable sort).
+pub fn sort_newest_first(list: &mut [ReleaseInfo]) {
+    list.sort_by(|a, b| {
+        match (crate::version::parse_version(&a.tag), crate::version::parse_version(&b.tag)) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
 }
 
 pub async fn find_latest_release(
@@ -431,4 +447,52 @@ pub fn download_url(asset: &ReleaseAsset) -> Result<&str> {
         "asset {} has no download URL",
         asset.name
     )))
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    fn tags(order: &[&str]) -> Vec<String> {
+        let mut list: Vec<ReleaseInfo> = order
+            .iter()
+            .map(|t| ReleaseInfo {
+                tag: t.to_string(),
+                name: t.to_string(),
+                body: String::new(),
+                prerelease: true,
+                html_url: String::new(),
+                asset: ReleaseAsset {
+                    name: "c.zip".into(),
+                    api_url: String::new(),
+                    browser_download_url: String::new(),
+                    size: 1,
+                    digest: None,
+                },
+            })
+            .collect();
+        sort_newest_first(&mut list);
+        list.into_iter().map(|r| r.tag).collect()
+    }
+
+    #[test]
+    fn same_commit_tie_picks_higher_version() {
+        assert_eq!(tags(&["v0.9.8.2", "v0.9.8.3"]), ["v0.9.8.3", "v0.9.8.2"]);
+    }
+
+    #[test]
+    fn github_order_from_main_repo_is_fixed() {
+        assert_eq!(
+            tags(&["v0.9.8", "v0.9.7.2", "v0.9.6.1", "v0.9.8.2", "v0.9.8.3", "v0.9.6", "v0.9.5"]),
+            ["v0.9.8.3", "v0.9.8.2", "v0.9.8", "v0.9.7.2", "v0.9.6.1", "v0.9.6", "v0.9.5"]
+        );
+    }
+
+    #[test]
+    fn suffixes_and_unparsable_tags() {
+        assert_eq!(
+            tags(&["nightly", "v0.9.0-mp1", "v0.9.4-mp5", "v0.9.4-ds1", "v0.9.5"]),
+            ["v0.9.5", "v0.9.4-mp5", "v0.9.4-ds1", "v0.9.0-mp1", "nightly"]
+        );
+    }
 }
