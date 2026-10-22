@@ -13,7 +13,7 @@ param(
     [string]$Ip = "71.71.45.128",
     [string]$ServerDir = "",
     [string]$AgentDir = "C:\uXa\ServerAgent",
-    [string]$Tag = "v0.9.5",
+    [string]$Tag = "",   # empty = the Latest release; pass -Tag vX.Y.Z to pin one
     [string]$Repo = "uXa-Sloppy/FridayNightFights",
     [int]$GamePort = 7777,
     [int]$AgentPort = 8788,
@@ -36,6 +36,35 @@ if (-not $isAdmin -and -not $DryRun) {
 }
 
 function Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
+# agent.json is only ever built as an object and written with ConvertTo-Json. Never text-substitute into it.
+function Read-JsonOrNull($path) {
+    try { return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json) } catch { return $null }
+}
+function Test-DirLike($p) { return ($p -is [string]) -and ($p -match '^[A-Za-z]:\\') }
+function Build-AgentConfig($examplePath, $existingPath, $installDir, $gamePort, $agentPort, $agentDir) {
+    $cfg = Get-Content -LiteralPath $examplePath -Raw | ConvertFrom-Json
+    if ($existingPath -and (Test-Path -LiteralPath $existingPath)) {
+        $old = Read-JsonOrNull $existingPath
+        if ($null -eq $old) {
+            $bad = "$existingPath.bad"
+            Copy-Item -LiteralPath $existingPath $bad -Force
+            Write-Warning "$existingPath could not be read (broken JSON). Saved it as $bad and writing a fresh one."
+        } else {
+            # Keep only known settings from the old file; junk keys are dropped.
+            foreach ($p in $cfg.PSObject.Properties.Name) {
+                if ($old.PSObject.Properties.Name -contains $p -and $null -ne $old.$p) { $cfg.$p = $old.$p }
+            }
+        }
+    }
+    $cfg.installDir = $installDir
+    $cfg.port = $gamePort
+    $cfg.listen = "0.0.0.0:$agentPort"
+    $crt = Join-Path $agentDir "agent.crt"; $key = Join-Path $agentDir "agent.key"
+    if ((Test-Path $crt) -and (Test-Path $key)) { $cfg.tlsCert = $crt; $cfg.tlsKey = $key }
+    $json = $cfg | ConvertTo-Json -Depth 10
+    $null = $json | ConvertFrom-Json   # self-check: must parse back
+    return $json
+}
 function Plain([Security.SecureString]$s) {
     $p = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)
     try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($p) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p) }
@@ -50,7 +79,7 @@ function Ask-Secret($prompt, $envName) {
     }
 }
 
-Write-Host "Friday Night Fights server setup ($Tag)" -ForegroundColor Green
+Write-Host "Friday Night Fights server setup ($(if ($Tag) { $Tag } else { 'latest release' }))" -ForegroundColor Green
 if ($DryRun) { Write-Host "DRY RUN: nothing will be installed or changed." -ForegroundColor Yellow }
 
 # --- Questions ---------------------------------------------------------------------------------
@@ -61,15 +90,17 @@ if (-not $ServerDir) {
     $default = "C:\FNF\Server"
     $cfg = Join-Path $AgentDir "agent.json"
     if (Test-Path $cfg) {
-        try { $old = (Get-Content $cfg -Raw | ConvertFrom-Json).installDir; if ($old) { $default = $old } } catch {}
+        $oldCfg = Read-JsonOrNull $cfg; if ($oldCfg -and (Test-DirLike $oldCfg.installDir)) { $default = $oldCfg.installDir }
     } else {
         foreach ($c in @("C:\FNF\Server", "C:\FNF\FridayNightFightsServer", "C:\uXa\FridayNightFightsServer", "D:\FNF\Server")) {
-            if (Test-Path (Join-Path $c "FridayNightFightsServer.exe")) { $default = $c; break }
+            if (Test-Path -LiteralPath ($c + "\FridayNightFightsServer.exe") -ErrorAction SilentlyContinue) { $default = $c; break }
         }
     }
     $ans = Read-Host "FNF server folder [$default]"
     $ServerDir = if ($ans.Trim()) { $ans.Trim().Trim('"') } else { $default }
 }
+$ServerDir = $ServerDir.Trim().Trim('"').TrimEnd('\')
+if (-not (Test-DirLike $ServerDir)) { throw "Server folder must be a full path like C:\FNF\Server (got: $ServerDir)." }
 
 # --- Download ----------------------------------------------------------------------------------
 Step "Downloading the agent from $Repo $Tag"
@@ -77,10 +108,13 @@ Step "Downloading the agent from $Repo $Tag"
 $ProgressPreference = "SilentlyContinue"
 $api = @{ Authorization = "Bearer $token"; "User-Agent" = "uxa-setup"; Accept = "application/vnd.github+json" }
 try {
-    $rel = Invoke-RestMethod -Headers $api "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+    $relUrl = if ($Tag) { "https://api.github.com/repos/$Repo/releases/tags/$Tag" } else { "https://api.github.com/repos/$Repo/releases/latest" }
+    $rel = Invoke-RestMethod -Headers $api $relUrl
 } catch {
-    throw "Could not read release $Tag. Check the GitHub token (it needs read access to $Repo)."
+    throw "Could not read release $(if ($Tag) { $Tag } else { 'latest' }). Check the GitHub token (it needs read access to $Repo)."
 }
+if (-not $Tag) { $Tag = $rel.tag_name }
+Write-Host "  Using release $Tag"
 $work = Join-Path $env:TEMP ("uxa-setup-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $work | Out-Null
 $need = @("uxa-server-agent.exe", "install-server-agent.ps1", "agent.example.json", "setup-agent-tls.ps1")
@@ -116,13 +150,9 @@ if ($DryRun) {
 Step "Installing the $Service service"
 New-Item -ItemType Directory -Force $AgentDir | Out-Null
 $cfgPath = Join-Path $AgentDir "agent.json"
-$cfgSrc = if (Test-Path $cfgPath) { $cfgPath } else { Join-Path $work "agent.example.json" }
-$cfg = Get-Content $cfgSrc -Raw | ConvertFrom-Json
-$cfg.installDir = $ServerDir
-$cfg.port = $GamePort
-$cfg.listen = "0.0.0.0:$AgentPort"
+$cfgJson = Build-AgentConfig (Join-Path $work "agent.example.json") $cfgPath $ServerDir $GamePort $AgentPort $AgentDir
 $cfgTmp = Join-Path $work "agent.json"
-[IO.File]::WriteAllText($cfgTmp, ($cfg | ConvertTo-Json -Depth 8))
+[IO.File]::WriteAllText($cfgTmp, $cfgJson)
 # Same process: the key is passed through this process's environment only, never on a command line.
 $env:UXA_AGENT_SECRET = $secret
 try {
