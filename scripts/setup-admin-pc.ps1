@@ -11,9 +11,9 @@ param(
     [string]$Installer = "",
     [switch]$SkipLauncher,
     [switch]$Machine,
-    [string]$Tag = "v0.9.5",
+    [string]$Tag = "",   # empty = the Latest release; pass -Tag vX.Y.Z to pin one
     [string]$Repo = "uXa-Sloppy/FridayNightFights",
-    [string]$AssetName = "uXa_Launcher_0.2.0_x64-setup.exe",
+    [string]$AssetName = "",   # empty = the newest uXa Launcher x64 installer on the release
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
@@ -29,9 +29,17 @@ if (-not $SkipLauncher) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $ProgressPreference = "SilentlyContinue"
         try {
-            $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $token"; "User-Agent" = "uxa-setup" } "https://api.github.com/repos/$Repo/releases/tags/$Tag"
-        } catch { throw "Could not read release $Tag. Check the GitHub token." }
-        $asset = $rel.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+            $relUrl = if ($Tag) { "https://api.github.com/repos/$Repo/releases/tags/$Tag" } else { "https://api.github.com/repos/$Repo/releases/latest" }
+            $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $token"; "User-Agent" = "uxa-setup" } $relUrl
+        } catch { throw "Could not read release $(if ($Tag) { $Tag } else { 'latest' }). Check the GitHub token." }
+        if (-not $Tag) { $Tag = $rel.tag_name }
+        Write-Host "Using release $Tag"
+        if ($AssetName) {
+            $asset = $rel.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+        } else {
+            $asset = $rel.assets | Where-Object { $_.name -like "uXa*Launcher_*_x64-setup.exe" } | Sort-Object name -Descending | Select-Object -First 1
+            if ($asset) { $AssetName = $asset.name } else { $AssetName = "uXa Launcher x64 installer" }
+        }
         if (-not $asset) { throw "Release $Tag has no $AssetName." }
         $Installer = Join-Path $env:TEMP $AssetName
         Write-Host "Downloading $AssetName ($([math]::Round($asset.size / 1MB, 1)) MB)..."

@@ -13,7 +13,7 @@ param(
     [string]$Ip = "71.71.45.128",
     [string]$ServerDir = "",
     [string]$AgentDir = "C:\uXa\ServerAgent",
-    [string]$Tag = "v0.9.5",
+    [string]$Tag = "",   # empty = the Latest release; pass -Tag vX.Y.Z to pin one
     [string]$Repo = "uXa-Sloppy/FridayNightFights",
     [int]$GamePort = 7777,
     [int]$AgentPort = 8788,
@@ -50,7 +50,7 @@ function Ask-Secret($prompt, $envName) {
     }
 }
 
-Write-Host "Friday Night Fights server setup ($Tag)" -ForegroundColor Green
+Write-Host "Friday Night Fights server setup ($(if ($Tag) { $Tag } else { 'latest release' }))" -ForegroundColor Green
 if ($DryRun) { Write-Host "DRY RUN: nothing will be installed or changed." -ForegroundColor Yellow }
 
 # --- Questions ---------------------------------------------------------------------------------
@@ -77,10 +77,13 @@ Step "Downloading the agent from $Repo $Tag"
 $ProgressPreference = "SilentlyContinue"
 $api = @{ Authorization = "Bearer $token"; "User-Agent" = "uxa-setup"; Accept = "application/vnd.github+json" }
 try {
-    $rel = Invoke-RestMethod -Headers $api "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+    $relUrl = if ($Tag) { "https://api.github.com/repos/$Repo/releases/tags/$Tag" } else { "https://api.github.com/repos/$Repo/releases/latest" }
+    $rel = Invoke-RestMethod -Headers $api $relUrl
 } catch {
-    throw "Could not read release $Tag. Check the GitHub token (it needs read access to $Repo)."
+    throw "Could not read release $(if ($Tag) { $Tag } else { 'latest' }). Check the GitHub token (it needs read access to $Repo)."
 }
+if (-not $Tag) { $Tag = $rel.tag_name }
+Write-Host "  Using release $Tag"
 $work = Join-Path $env:TEMP ("uxa-setup-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $work | Out-Null
 $need = @("uxa-server-agent.exe", "install-server-agent.ps1", "agent.example.json", "setup-agent-tls.ps1")
