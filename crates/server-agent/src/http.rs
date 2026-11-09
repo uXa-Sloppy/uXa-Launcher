@@ -67,6 +67,146 @@ fn query_u64(uri: &Uri, key: &str) -> u64 {
     0
 }
 
+/// Public prefix the agent proxies to its local account server (127.0.0.1:<accountServer.port>).
+pub const ACCOUNT_PROXY_PREFIX: &str = "/fnf-accounts";
+const ACCOUNT_MAX_BODY: usize = 4096;
+const SIGNUPS_PER_IP_PER_MIN: usize = 6;
+const SIGNUPS_PER_MIN: usize = 60;
+const HEALTH_PER_MIN: usize = 120;
+
+/// `/fnf-accounts/v1/signup`, `/fnf-accounts/v1/health`, and the form game clients up to
+/// 0.10.0 send (`/fnf-accounts:<port>/v1/...`, because they build `http://<spec>/v1/signup`
+/// from `-FNFAccountServer=<host>:<port>/fnf-accounts:<port>`). Anything else: None.
+pub fn account_proxy_target(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix(ACCOUNT_PROXY_PREFIX)?;
+    let rest = match rest.strip_prefix(':') {
+        Some(after) => {
+            let end = after.find('/').unwrap_or(after.len());
+            if end == 0 || end > 5 || !after[..end].bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            &after[end..]
+        }
+        None => rest,
+    };
+    match rest {
+        "/v1/signup" => Some("/v1/signup"),
+        "/v1/health" => Some("/v1/health"),
+        _ => None,
+    }
+}
+
+struct RateWindow {
+    per_ip: std::collections::HashMap<String, Vec<std::time::Instant>>,
+    signups: Vec<std::time::Instant>,
+    health: Vec<std::time::Instant>,
+}
+
+fn rate_window() -> &'static std::sync::Mutex<RateWindow> {
+    static W: std::sync::OnceLock<std::sync::Mutex<RateWindow>> = std::sync::OnceLock::new();
+    W.get_or_init(|| {
+        std::sync::Mutex::new(RateWindow { per_ip: Default::default(), signups: Vec::new(), health: Vec::new() })
+    })
+}
+
+/// Sliding one-minute limits: per client IP and overall for sign-ups, overall for health checks.
+fn rate_allow(ip: &str, signup: bool) -> bool {
+    let now = std::time::Instant::now();
+    let minute = std::time::Duration::from_secs(60);
+    let Ok(mut w) = rate_window().lock() else { return false };
+    let fresh = |v: &mut Vec<std::time::Instant>| v.retain(|t| now.duration_since(*t) < minute);
+    if !signup {
+        fresh(&mut w.health);
+        if w.health.len() >= HEALTH_PER_MIN {
+            return false;
+        }
+        w.health.push(now);
+        return true;
+    }
+    fresh(&mut w.signups);
+    if w.per_ip.len() > 4096 {
+        w.per_ip.retain(|_, v| v.last().map_or(false, |t| now.duration_since(*t) < minute));
+    }
+    let mine = w.per_ip.entry(ip.to_string()).or_default();
+    mine.retain(|t| now.duration_since(*t) < minute);
+    if mine.len() >= SIGNUPS_PER_IP_PER_MIN {
+        return false;
+    }
+    mine.push(now);
+    if w.signups.len() >= SIGNUPS_PER_MIN {
+        return false;
+    }
+    w.signups.push(now);
+    true
+}
+
+fn client_ip(headers: &HeaderMap) -> String {
+    // Behind a Cloudflare tunnel every request comes from cloudflared on loopback; Cloudflare
+    // sets CF-Connecting-IP. Direct callers could fake it, but the overall limit still holds.
+    let cf = header(headers, "cf-connecting-ip").trim();
+    if !cf.is_empty() {
+        return cf.chars().take(64).collect();
+    }
+    let xff = header(headers, "x-forwarded-for").split(',').next().unwrap_or("").trim();
+    if !xff.is_empty() {
+        return xff.chars().take(64).collect();
+    }
+    "direct".into()
+}
+
+fn account_json(status: StatusCode, error: &str, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "ok": false, "error": error, "message": message }))).into_response()
+}
+
+/// Public, unsigned: forwards invite sign-ups to the local account server. Bodies (invite keys,
+/// passwords) are passed through untouched and never logged.
+async fn account_proxy(agent: &Agent, method: &Method, target: &'static str, headers: &HeaderMap, body: Bytes) -> Response {
+    let signup = target == "/v1/signup";
+    let allowed = if signup { *method == Method::POST } else { *method == Method::GET };
+    if !allowed {
+        return account_json(StatusCode::METHOD_NOT_ALLOWED, "not_found", "Not found.");
+    }
+    if body.len() > ACCOUNT_MAX_BODY {
+        return account_json(StatusCode::PAYLOAD_TOO_LARGE, "bad_request", "Request too large.");
+    }
+    let cfg = &agent.config.account_server;
+    if !cfg.enabled {
+        return account_json(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Sign-ups are not enabled on this server.");
+    }
+    let ip = client_ip(headers);
+    if !rate_allow(&ip, signup) {
+        if signup {
+            agent.log("account proxy: sign-up rate limit hit".to_string());
+        }
+        return account_json(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many sign-up attempts. Try again in a minute.");
+    }
+    let url = format!("http://127.0.0.1:{}{}", cfg.port, target);
+    let request = if signup {
+        agent.client.post(&url).header("Content-Type", "application/json").body(body.to_vec())
+    } else {
+        agent.client.get(&url)
+    };
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(10), request.send()).await;
+    let response = match sent {
+        Ok(Ok(r)) => r,
+        _ => {
+            if signup {
+                agent.log("account proxy: account server did not answer".to_string());
+            }
+            return account_json(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Account server is offline. Try again shortly.");
+        }
+    };
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = match response.bytes().await {
+        Ok(b) if b.len() <= 64 * 1024 => b,
+        _ => return account_json(StatusCode::BAD_GATEWAY, "unavailable", "Account server reply was unreadable."),
+    };
+    if signup {
+        agent.log(format!("account proxy: sign-up -> HTTP {}", status.as_u16()));
+    }
+    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], bytes).into_response()
+}
+
 async fn dispatch(
     State(agent): State<Arc<Agent>>,
     method: Method,
@@ -75,6 +215,12 @@ async fn dispatch(
     body: Bytes,
 ) -> Response {
     let path = uri.path();
+    if path.starts_with(ACCOUNT_PROXY_PREFIX) {
+        return match account_proxy_target(path) {
+            Some(target) => account_proxy(&agent, &method, target, &headers, body).await,
+            None => account_json(StatusCode::NOT_FOUND, "not_found", "Not found."),
+        };
+    }
     let timestamp = header(&headers, "x-uxa-timestamp");
     let signature = header(&headers, "x-uxa-signature");
     if let Err(err) = verify_request(
@@ -234,6 +380,33 @@ impl IntoResponse for Reply {
 
 fn router(agent: Arc<Agent>) -> Router {
     Router::new().fallback(dispatch).with_state(agent)
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn proxy_paths() {
+        assert_eq!(account_proxy_target("/fnf-accounts/v1/signup"), Some("/v1/signup"));
+        assert_eq!(account_proxy_target("/fnf-accounts:80/v1/signup"), Some("/v1/signup"));
+        assert_eq!(account_proxy_target("/fnf-accounts:8788/v1/health"), Some("/v1/health"));
+        assert_eq!(account_proxy_target("/fnf-accounts/v1/../v1/status"), None);
+        assert_eq!(account_proxy_target("/fnf-accounts:/v1/signup"), None);
+        assert_eq!(account_proxy_target("/fnf-accounts:x/v1/signup"), None);
+        assert_eq!(account_proxy_target("/fnf-accountsX/v1/signup"), None);
+        assert_eq!(account_proxy_target("/v1/signup"), None);
+    }
+
+    #[test]
+    fn per_ip_signup_limit() {
+        let ip = "203.0.113.250";
+        for _ in 0..SIGNUPS_PER_IP_PER_MIN {
+            assert!(rate_allow(ip, true));
+        }
+        assert!(!rate_allow(ip, true));
+        assert!(rate_allow("203.0.113.251", true));
+    }
 }
 
 pub async fn serve_listener(agent: Arc<Agent>, listener: TcpListener) -> Result<(), String> {

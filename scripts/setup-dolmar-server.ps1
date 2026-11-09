@@ -106,7 +106,7 @@ if ($DryRun) {
     Write-Host "  set agent.json installDir=$ServerDir, port=$GamePort, listen=0.0.0.0:$AgentPort"
     Write-Host "  set machine env UXA_GITHUB_TOKEN (and the service's own environment)"
     Write-Host "  create the TLS certificate for $Ip and set tlsCert/tlsKey"
-    Write-Host "  open firewall UDP $GamePort, TCP $AgentPort and TCP $AccountPort (account server), restart $Service, check port $AgentPort"
+    Write-Host "  open firewall UDP $GamePort and TCP $AgentPort (sign-ups go through the agent at /fnf-accounts; no 7798 rule), restart $Service, check port $AgentPort"
     Remove-Item $work -Recurse -Force
     $secret = $null; $token = $null
     Write-Host ""; Write-Host "Dry run OK: token works, all 4 files downloaded." -ForegroundColor Green
@@ -123,7 +123,7 @@ $cfg.installDir = $ServerDir
 $cfg.port = $GamePort
 $cfg.listen = "0.0.0.0:$AgentPort"
 if (-not $cfg.PSObject.Properties["accountServer"]) {
-    $cfg | Add-Member -NotePropertyName accountServer -NotePropertyValue ([pscustomobject]@{ enabled = $true; host = "0.0.0.0"; port = $AccountPort; watchdog = $true })
+    $cfg | Add-Member -NotePropertyName accountServer -NotePropertyValue ([pscustomobject]@{ enabled = $true; host = "127.0.0.1"; port = $AccountPort; watchdog = $true })
 }
 $cfgTmp = Join-Path $work "agent.json"
 [IO.File]::WriteAllText($cfgTmp, ($cfg | ConvertTo-Json -Depth 8))
@@ -148,7 +148,9 @@ Step "Turning on HTTPS for $Ip"
 & (Join-Path $work "setup-agent-tls.ps1") -Ip $Ip -AgentDir $AgentDir -NoRestart
 
 Step "Opening the firewall"
-foreach ($r in @(@{ n = "FNF Game Server (UDP $GamePort)"; p = "UDP"; port = $GamePort }, @{ n = "uXa Server Agent (TCP $AgentPort)"; p = "TCP"; port = $AgentPort }, @{ n = "FNF Account Server (TCP $AccountPort)"; p = "TCP"; port = $AccountPort })) {
+# 0.3.10: the account server listens on 127.0.0.1 only; players reach it through the agent (/fnf-accounts).
+Get-NetFirewallRule -DisplayName "FNF Account Server (TCP $AccountPort)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+foreach ($r in @(@{ n = "FNF Game Server (UDP $GamePort)"; p = "UDP"; port = $GamePort }, @{ n = "uXa Server Agent (TCP $AgentPort)"; p = "TCP"; port = $AgentPort })) {
     Get-NetFirewallRule -DisplayName $r.n -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName $r.n -Direction Inbound -Protocol $r.p -LocalPort $r.port -Action Allow -Profile Any | Out-Null
     Write-Host "  $($r.n)"
@@ -180,7 +182,7 @@ Write-Host "  $cer"
 Write-Host "  CA thumbprint: $thumb"
 Write-Host "Do NOT send agent.key or agent.secret."
 Write-Host ""
-Write-Host "Router: forward UDP $GamePort (game), TCP $AgentPort (agent) and TCP $AccountPort (account sign-ups) to this PC's LAN IP." -ForegroundColor Yellow
+Write-Host "Router: forward UDP $GamePort (game) to this PC's LAN IP. TCP $AgentPort only if you do not use a Cloudflare tunnel for the agent. No TCP $AccountPort: sign-ups go through the agent." -ForegroundColor Yellow
 Write-Host "        $Ip must be this network's public IP."
 if ($ok) { Write-Host "All done." -ForegroundColor Green } else { Write-Host "Something is not right. Send Dave a screenshot of this window." -ForegroundColor Red }
 explorer.exe /select,"$cer"

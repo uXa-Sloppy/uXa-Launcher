@@ -84,7 +84,8 @@ impl AccountServerConfig {
             data_dir: PathBuf::new(),
             python: default_python(),
             script: "Tools/fnf_account_server.py".into(),
-            host: "0.0.0.0".into(),
+            // 0.3.10: loopback only. Players reach it through the agent's /fnf-accounts proxy.
+            host: "127.0.0.1".into(),
             port: 7798,
             watchdog: true,
         }
@@ -600,6 +601,11 @@ impl AgentConfig {
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty());
             self.account_server.install_dir = parent.unwrap_or(Path::new(".")).join("FNFAccountServer");
+        }
+        // The account server is never exposed directly any more (an old agent.json may still say
+        // 0.0.0.0): sign-ups come in through the agent's /fnf-accounts proxy on its own listener.
+        if !matches!(self.account_server.host.trim(), "127.0.0.1" | "localhost" | "::1") {
+            self.account_server.host = "127.0.0.1".into();
         }
         if matches!(self.account_server.port, 7777 | 7797) || self.account_server.port == self.port {
             return Err(format!(

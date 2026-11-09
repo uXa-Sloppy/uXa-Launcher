@@ -250,7 +250,8 @@ A release with a single zip works exactly as before, and a single zip wins when 
 exist. Launcher/agent 0.3.8 and older cannot read split releases, so ship 0.3.9 first.
 
 **Account server.** The agent runs the FNF account server (invite-key sign-ups) from
-`FNFAccountServer` next to the game server, on TCP 7798 (`accountServer` in agent.json).
+`FNFAccountServer` next to the game server, on 127.0.0.1:7798 (`accountServer` in agent.json;
+from 0.3.10 always loopback, see below).
 Data stays in the game's `Saved/Accounts`, so deploys keep it and every Saved backup
 includes it. Package it with `scripts/package-account-server.ps1` (embeddable Python, no
 install on the game PC) and attach `FNF_<version>_Accounts_Win64.zip` to the game release.
@@ -271,4 +272,23 @@ The launcher shows it under Server admin > Server status (refreshes every 15 s).
 **CLI.** `uxa-launcher --agent GET /v1/monitor`, `--agent POST <path> <json>`, and
 `--mint-invite <discord name>` (prints the key; only its hash goes to the server).
 
-**Client.** The launcher passes `-FNFAccountServer=<host>:<accountPort|7798>` to the game.
+**Client.** The launcher passes `-FNFAccountServer=<spec>` to the game (see 0.3.10).
+
+## 0.3.10: sign-ups through the agent (no TCP 7798 port forward)
+
+**Agent proxy.** The account server binds 127.0.0.1 only (an old `"host": "0.0.0.0"` is
+overridden). The agent forwards two public, unsigned routes on its own listener (8788 or its
+Cloudflare tunnel) to it: `POST /fnf-accounts/v1/signup` and `GET /fnf-accounts/v1/health`.
+It also accepts `/fnf-accounts:<port>/v1/...`, the path a 0.10.0 game client sends (below).
+Limits: 4 KB bodies, 6 sign-ups per minute per client IP (`CF-Connecting-IP` behind a tunnel),
+60 sign-ups and 120 health checks per minute overall, 10 s upstream timeout. Bodies (invite
+keys, passwords) are never logged; the agent log only records the HTTP result. Everything
+else on the agent still needs the signed admin key.
+
+**Launcher.** `-FNFAccountServer` comes from, in order: the server's `accountUrl`; the same
+field in the published `servers.json` on `uXa-Sloppy/FridayNightFights-Releases` main (only
+`accountUrl` is read from it, cached for offline starts), so a new tunnel address reaches
+players without a launcher release; `agentUrl` + `/fnf-accounts` when the agent is plain HTTP
+or HTTPS on the default port (a tunnel); otherwise the legacy `<host>:<accountPort|7798>`.
+Game clients up to 0.10.0 build `http://<spec>/v1/signup` from `host:port`, so a URL with a
+path is passed as `host:port/fnf-accounts:port` (tunnels answer plain HTTP on port 80).

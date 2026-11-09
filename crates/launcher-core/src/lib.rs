@@ -33,8 +33,9 @@ pub use github::{
 pub use invite::{invite_key_hash, mint_invite_key};
 pub use inspect::{inspect_game, InspectRequest};
 pub use launch::{
-    find_executable, format_address, format_servers_ini, prepare_client_launch, probe_tcp,
-    spawn_process, validate_server, write_servers_ini, ClientLaunch, PlayPlan,
+    account_server_arg, account_spec_from_url, agent_account_url, find_executable, format_address,
+    format_servers_ini, prepare_client_launch, probe_tcp, spawn_process, validate_server,
+    write_servers_ini, ClientLaunch, PlayPlan, ACCOUNT_PROXY_PATH,
 };
 pub use model::{
     load_catalog, load_news, load_servers, load_settings, read_manifest, resolve_install_dir,
@@ -64,5 +65,5 @@ pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
 pub use version::{is_newer, parse_version, GameVersion};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
-pub const USER_AGENT: &str = "uXa-Launcher/0.3.9";
+pub const USER_AGENT: &str = "uXa-Launcher/0.3.10";
 pub const DEFAULT_WEB_VERSION_PATTERN: &str = r"Build\s+(\d+)\s*,\s*last updated\s+([^<\r\n]+)";
