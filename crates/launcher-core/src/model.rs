@@ -94,6 +94,9 @@ pub struct ServerEntry {
     /// Base URL of the uXa Server Agent. Empty when this host is not managed from the launcher.
     #[serde(default)]
     pub agent_url: String,
+    /// TCP port of the FNF account server (invite-key sign-ups) on `host`. Default 7798.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_port: Option<u16>,
 }
 
 pub type ServerMap = HashMap<String, Vec<ServerEntry>>;

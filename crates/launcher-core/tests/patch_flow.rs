@@ -237,6 +237,7 @@ fn servers_ini_matches_the_game_format() {
             port: 7777,
             default: true,
             agent_url: String::new(),
+            account_port: None,
         },
         ServerEntry {
             id: "localhost".into(),
@@ -245,6 +246,7 @@ fn servers_ini_matches_the_game_format() {
             port: 7777,
             default: false,
             agent_url: String::new(),
+            account_port: None,
         },
     ];
     assert_eq!(
@@ -351,7 +353,7 @@ async fn patch_preserves_saves_and_swaps_atomically() {
     })
     .unwrap();
     let PlayPlan::Process { args, program, .. } = &plan;
-    assert_eq!(args, &vec!["71.71.45.128:7777".to_string()]);
+    assert_eq!(args, &vec!["71.71.45.128:7777".to_string(), "-FNFAccountServer=71.71.45.128:7798".to_string()]);
     assert_eq!(
         fs::read_to_string(install.join("Config/Servers.ini")).unwrap(),
         "Dolmar's Server | 71.71.45.128 | 7777\nLocalhost | 127.0.0.1 | 7777\n"

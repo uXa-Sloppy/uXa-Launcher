@@ -7,11 +7,13 @@ mod cli;
 mod error;
 mod github;
 mod inspect;
+mod invite;
 mod launch;
 mod model;
 mod patch;
 mod self_update;
 mod sign;
+mod split;
 mod version;
 mod web;
 
@@ -28,6 +30,7 @@ pub use github::{
     list_matching_releases, repo_visibility, CheckUpdate, FullRelease, ReleaseAsset, ReleaseInfo,
     ReleaseSource, RepoVisibility,
 };
+pub use invite::{invite_key_hash, mint_invite_key};
 pub use inspect::{inspect_game, InspectRequest};
 pub use launch::{
     find_executable, format_address, format_servers_ini, prepare_client_launch, probe_tcp,
@@ -52,9 +55,14 @@ pub use self_update::{
     CHECKSUM_ASSET, DEFAULT_UPDATE_OWNER, DEFAULT_UPDATE_REPO, INSTALL_DIR_NAME,
     LAUNCHER_EXE_ASSET,
 };
+pub use split::{
+    download_split, find_split_asset, join_parts, sha256_file, split_file, validate_manifest,
+    PartEntry, PartsManifest, SplitAsset, SplitDownload, DEFAULT_PART_SIZE, GITHUB_ASSET_LIMIT,
+    PARTS_MANIFEST_SUFFIX,
+};
 pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
 pub use version::{is_newer, parse_version, GameVersion};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
-pub const USER_AGENT: &str = "uXa-Launcher/0.3.1";
+pub const USER_AGENT: &str = "uXa-Launcher/0.3.9";
 pub const DEFAULT_WEB_VERSION_PATTERN: &str = r"Build\s+(\d+)\s*,\s*last updated\s+([^<\r\n]+)";

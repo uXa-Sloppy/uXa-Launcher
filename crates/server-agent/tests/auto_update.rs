@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use uxa_server_agent::{Agent, AgentConfig, AutoUpdateConfig, SelfUpdateOutcome};
+use uxa_server_agent::{Agent, AccountServerConfig, AgentConfig, AutoUpdateConfig, SelfUpdateOutcome};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -168,6 +168,7 @@ fn test_config(root: &Path, api: &str) -> AgentConfig {
         log_dir: root.join("logs"),
         secret: "test-secret-not-for-production".into(),
         auto_update: auto,
+        account_server: AccountServerConfig::disabled(),
     };
     config.finish_paths().unwrap();
     config

@@ -228,7 +228,33 @@ impl Agent {
     /// Cargo target builds are skipped so tests do not overwrite themselves.
     /// A cargo-target skip happens before any download.
     pub async fn run_agent_self_update(&self) -> Result<SelfUpdateOutcome, String> {
-        if !self.config.auto_update.agent_enabled {
+        self.run_agent_self_update_with(false).await
+    }
+
+    /// Admin "update the agent now" (POST /v1/agent/update). Works even when scheduled
+    /// agent updates are off. The reply is sent before the agent restarts itself.
+    pub async fn update_agent_now(self: &Arc<Self>) -> Result<String, String> {
+        if self.busy.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Another admin action is running; try again when it finishes.".into());
+        }
+        match self.run_agent_self_update_with(true).await? {
+            SelfUpdateOutcome::Restarting => {
+                self.record_event("agent-update", "agent replaced itself; restarting");
+                tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    std::process::exit(0);
+                });
+                Ok("Agent updated; it restarts in a few seconds. The game server keeps running.".into())
+            }
+            SelfUpdateOutcome::Skipped => {
+                let last = self.logs_after(0).last().map(|l| l.message.clone()).unwrap_or_default();
+                Ok(format!("No agent update applied ({last}). Running {}.", env!("CARGO_PKG_VERSION")))
+            }
+        }
+    }
+
+    async fn run_agent_self_update_with(&self, manual: bool) -> Result<SelfUpdateOutcome, String> {
+        if !manual && !self.config.auto_update.agent_enabled {
             return Ok(SelfUpdateOutcome::Skipped);
         }
         let exe = std::env::current_exe().map_err(|err| err.to_string())?;
@@ -411,6 +437,10 @@ impl Agent {
         let downloads = self.config.work_dir.join("downloads");
         fs::create_dir_all(&downloads).map_err(|err| err.to_string())?;
         let exe_path = downloads.join(asset_name);
+        // Never resume from a file left by an older update: same-size leftovers would be
+        // treated as complete and fail (or worse, pass) verification.
+        let _ = fs::remove_file(&exe_path);
+        let _ = fs::remove_file(downloads.join(CHECKSUM_ASSET));
         let url = download_url(asset)
             .map_err(|err| err.to_string())?
             .to_string();
@@ -499,6 +529,20 @@ impl Agent {
             Ok(SelfUpdateOutcome::Skipped) => {}
             Err(err) => self.note_update(format!("agent self-update failed: {err}")),
         }
+    }
+}
+
+impl Agent {
+    /// Every 30 s: keep the account server up and restart a crashed game server.
+    pub fn spawn_watchdog(self: &Arc<Self>) {
+        let agent = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            loop {
+                agent.watchdog_tick().await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
     }
 }
 

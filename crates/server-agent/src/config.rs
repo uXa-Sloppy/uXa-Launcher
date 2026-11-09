@@ -55,6 +55,83 @@ impl AutoUpdateConfig {
     }
 }
 
+/// FNF account server (invite-key sign-ups, TCP 7798) run and updated by the agent.
+#[derive(Debug, Clone)]
+pub struct AccountServerConfig {
+    pub enabled: bool,
+    /// Tokens the release asset name must contain (default Accounts, Win64; never "Server" or "Client", so older agents and launchers can never pick it up as a game build).
+    pub asset_contains: Vec<String>,
+    /// Program folder (python + Tools). Default: `<installDir parent>/FNFAccountServer`.
+    pub install_dir: PathBuf,
+    /// accounts.txt / invite_keys.txt. Default: `<game Saved>/Accounts`, so deploy
+    /// preserves it and every Saved backup includes it.
+    pub data_dir: PathBuf,
+    /// Interpreter, relative to install_dir or on PATH. Default `python/python.exe`.
+    pub python: String,
+    pub script: String,
+    pub host: String,
+    pub port: u16,
+    /// Start it with the agent and restart it when its health check fails.
+    pub watchdog: bool,
+}
+
+impl AccountServerConfig {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            asset_contains: vec!["Accounts".into(), "Win64".into()],
+            install_dir: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            python: default_python(),
+            script: "Tools/fnf_account_server.py".into(),
+            host: "0.0.0.0".into(),
+            port: 7798,
+            watchdog: true,
+        }
+    }
+}
+
+fn default_python() -> String {
+    if cfg!(windows) {
+        "python/python.exe".into()
+    } else {
+        "python3".into()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AccountServerFile {
+    enabled: bool,
+    asset_contains: Vec<String>,
+    install_dir: String,
+    data_dir: String,
+    python: String,
+    script: String,
+    host: String,
+    port: u16,
+    watchdog: bool,
+}
+
+impl Default for AccountServerFile {
+    fn default() -> Self {
+        let base = AccountServerConfig::disabled();
+        Self {
+            // On by default from 0.3.9: a config without the block still runs sign-ups once a
+            // package is installed (nothing starts until FNFAccountServer exists).
+            enabled: true,
+            asset_contains: base.asset_contains,
+            install_dir: String::new(),
+            data_dir: String::new(),
+            python: String::new(),
+            script: base.script,
+            host: base.host,
+            port: base.port,
+            watchdog: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub install_dir: PathBuf,
@@ -81,6 +158,7 @@ pub struct AgentConfig {
     pub log_dir: PathBuf,
     pub secret: String,
     pub auto_update: AutoUpdateConfig,
+    pub account_server: AccountServerConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +207,8 @@ struct FileConfig {
     log_dir: String,
     #[serde(default)]
     auto_update: AutoUpdateFile,
+    #[serde(default)]
+    account_server: AccountServerFile,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,7 +313,7 @@ fn default_owner() -> String {
     "uXa-Sloppy".into()
 }
 fn default_repo() -> String {
-    "FridayNightFights".into()
+    "FridayNightFights-Releases".into()
 }
 fn default_contains() -> Vec<String> {
     vec!["Server".into(), "Win64".into()]
@@ -441,7 +521,27 @@ impl FileConfig {
             log_dir: PathBuf::from(self.log_dir.trim()),
             secret,
             auto_update: map_auto(self.auto_update),
+            account_server: map_accounts(self.account_server),
         })
+    }
+}
+
+fn map_accounts(file: AccountServerFile) -> AccountServerConfig {
+    let base = AccountServerConfig::disabled();
+    AccountServerConfig {
+        enabled: file.enabled,
+        asset_contains: if file.asset_contains.is_empty() {
+            base.asset_contains
+        } else {
+            file.asset_contains
+        },
+        install_dir: PathBuf::from(file.install_dir.trim()),
+        data_dir: PathBuf::from(file.data_dir.trim()),
+        python: nonempty(file.python, base.python),
+        script: nonempty(file.script, base.script),
+        host: nonempty(file.host, base.host),
+        port: if file.port == 0 { base.port } else { file.port },
+        watchdog: file.watchdog,
     }
 }
 
@@ -493,6 +593,19 @@ impl AgentConfig {
         }
         if self.log_dir.as_os_str().is_empty() {
             self.log_dir = self.work_dir.join("logs");
+        }
+        if self.account_server.install_dir.as_os_str().is_empty() {
+            let parent = self
+                .install_dir
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty());
+            self.account_server.install_dir = parent.unwrap_or(Path::new(".")).join("FNFAccountServer");
+        }
+        if matches!(self.account_server.port, 7777 | 7797) || self.account_server.port == self.port {
+            return Err(format!(
+                "accountServer.port {} collides with a game port. Use TCP 7798.",
+                self.account_server.port
+            ));
         }
         let cert_set = !self.tls_cert.as_os_str().is_empty();
         let key_set = !self.tls_key.as_os_str().is_empty();

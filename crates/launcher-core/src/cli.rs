@@ -37,6 +37,10 @@ pub enum CliCommand {
     Status,
     UpdateClient,
     DeployServer { version: String },
+    /// Signed raw call to the selected server's agent, e.g. `--agent GET /v1/monitor`.
+    Agent { method: String, path: String, body: String },
+    /// Mint an invite key here, register only its hash on the server, print the key.
+    MintInvite { note: String },
 }
 
 pub struct CliInput<'a> {
@@ -128,6 +132,8 @@ pub fn command_label(command: &CliCommand) -> String {
         CliCommand::Status => "--status".into(),
         CliCommand::UpdateClient => "--update-client".into(),
         CliCommand::DeployServer { version } => format!("--deploy-server {version}"),
+        CliCommand::Agent { method, path, .. } => format!("--agent {method} {path}"),
+        CliCommand::MintInvite { .. } => "--mint-invite".into(),
     }
 }
 
@@ -245,6 +251,33 @@ pub fn parse_cli(args: &[String]) -> Result<Option<CliCommand>, String> {
                     version: version.to_string(),
                 }
             }
+            "--agent" => {
+                let method = args.get(index + 1).map(|m| m.to_ascii_uppercase()).unwrap_or_default();
+                let path = args.get(index + 2).cloned().unwrap_or_default();
+                if !(method == "GET" || method == "POST") || !path.starts_with("/v1/") {
+                    return Err("--agent needs GET or POST and a /v1/ path, for example --agent GET /v1/monitor.".into());
+                }
+                index += 2;
+                let mut body = String::new();
+                if let Some(next) = args.get(index + 1) {
+                    if !next.starts_with("--") {
+                        body = next.clone();
+                        index += 1;
+                    }
+                }
+                if !body.is_empty() && serde_json::from_str::<serde_json::Value>(&body).is_err() {
+                    return Err("--agent body must be JSON.".into());
+                }
+                CliCommand::Agent { method, path, body }
+            }
+            "--mint-invite" => {
+                let note = args.get(index + 1).map(String::as_str).unwrap_or("");
+                if note.is_empty() || note.starts_with("--") {
+                    return Err("--mint-invite needs a note, usually the Discord name.".into());
+                }
+                index += 1;
+                CliCommand::MintInvite { note: note.to_string() }
+            }
             other => {
                 return Err(format!(
                     "Unknown argument {other}. Run with --help for usage."
@@ -270,6 +303,8 @@ Usage:
   uxa-launcher --status
   uxa-launcher --update-client
   uxa-launcher --deploy-server <version>
+  uxa-launcher --agent <GET|POST> <path> [json]
+  uxa-launcher --mint-invite <note>
   uxa-launcher --version
   uxa-launcher --help
 
@@ -288,6 +323,17 @@ do not open a window. They still run when the window is already open.
     Deploy that Friday Night Fights server version (a release tag such as
     v1.2.0) to the selected server. Dolmar's Server is the default. This uses
     the admin key already saved by the launcher window.
+
+--agent <GET|POST> <path> [json]
+    Signed call to the selected server agent; prints its JSON reply. Examples:
+      --agent GET /v1/monitor
+      --agent POST /v1/accounts/deploy {{\"tag\":\"v0.9.9\"}}
+      --agent POST /v1/agent/update
+      --agent POST /v1/wipe {{\"confirm\":\"WIPE\"}}
+
+--mint-invite <note>
+    Make a one-time pre-alpha invite key on this PC, add only its SHA-256 to
+    the server's invite_keys.txt, and print the key on stdout.
 
 The server list is the bundled config, or %LOCALAPPDATA%\\uXa\\Launcher\\servers.json
 when that file is present. Deploy and status use the saved admin key. Unlock
@@ -327,6 +373,8 @@ pub async fn execute_cli(
         CliCommand::Status => status(client, input).await,
         CliCommand::UpdateClient => update_client(client, input).await,
         CliCommand::DeployServer { version } => deploy(client, input, &version).await,
+        CliCommand::Agent { method, path, body } => agent_raw(client, input, &method, &path, &body).await,
+        CliCommand::MintInvite { note } => mint_invite(client, input, &note).await,
     };
     finish(input, guard, report)
 }
@@ -585,6 +633,51 @@ async fn deploy(client: &reqwest::Client, input: &CliInput<'_>, version: &str) -
     };
     report.versions.server = Some(action.status.version);
     report
+}
+
+fn agent_target<'a>(input: &'a CliInput<'a>) -> Result<(String, &'a str, String), String> {
+    let loaded = load_context(input)?;
+    let server = pick_server(&loaded.settings, &loaded.servers)?.clone();
+    let secret = saved_secret(input.admin_key).ok_or_else(|| MISSING_ADMIN_KEY.to_string())?;
+    let base = agent_base(&server, input.agent_url_override)?;
+    Ok((base, secret, server.name.clone()))
+}
+
+async fn agent_raw(client: &reqwest::Client, input: &CliInput<'_>, method: &str, path: &str, body: &str) -> CliReport {
+    let (base, secret, _name) = match agent_target(input) {
+        Ok(t) => t,
+        Err(err) => return fail_report(String::new(), err),
+    };
+    match agent_exchange(client, &base, secret, method, path, body.as_bytes()).await {
+        Ok(reply) => {
+            let pretty = serde_json::from_str::<serde_json::Value>(&reply)
+                .ok()
+                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                .unwrap_or(reply);
+            ok_report(format!("{pretty}\n"))
+        }
+        Err(err) => fail_report(String::new(), err.to_string()),
+    }
+}
+
+async fn mint_invite(client: &reqwest::Client, input: &CliInput<'_>, note: &str) -> CliReport {
+    let (base, secret, name) = match agent_target(input) {
+        Ok(t) => t,
+        Err(err) => return fail_report(String::new(), err),
+    };
+    let (key, hash) = match crate::invite::mint_invite_key() {
+        Ok(pair) => pair,
+        Err(err) => return fail_report(String::new(), err.to_string()),
+    };
+    let payload = serde_json::json!({ "keySha256": hash, "note": note }).to_string();
+    match agent_exchange(client, &base, secret, "POST", "/v1/accounts/invite", payload.as_bytes()).await {
+        Ok(_) => {
+            let mut report = ok_report(format!("{key}\n"));
+            report.stderr = format!("Invite key registered on {name} (hash only).\n");
+            report
+        }
+        Err(err) => fail_report(String::new(), err.to_string()),
+    }
 }
 
 struct Loaded {

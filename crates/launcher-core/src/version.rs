@@ -5,12 +5,15 @@ use std::sync::OnceLock;
 
 use crate::{Error, Result};
 
-/// A release version with 2 to 4 numeric parts (`0.9`, `0.9.6`, `0.9.6.1`) and an optional
+/// A release version with 2 to 8 numeric parts (`0.9`, `0.9.6`, `0.9.6.1`, `0.9.8.3.1`) and an optional
 /// `-pre` suffix. Missing parts count as 0, so `0.9.6` == `0.9.6.0` < `0.9.6.1` < `0.9.7`.
 /// A pre-release sorts before the same numbers without one (`1.0.0-rc.1` < `1.0.0`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Most numeric parts a tag may have; longer tags are treated as unparsable.
+pub const MAX_PARTS: usize = 8;
+
+#[derive(Debug, Clone)]
 pub struct GameVersion {
-    parts: [u64; 4],
+    parts: [u64; MAX_PARTS],
     count: usize,
     pre: Option<String>,
 }
@@ -48,6 +51,15 @@ impl Ord for GameVersion {
     }
 }
 
+// Equality follows ordering, so `0.9.8.3` == `0.9.8.3.0`.
+impl PartialEq for GameVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for GameVersion {}
+
 impl PartialOrd for GameVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -81,8 +93,10 @@ fn compare_pre(a: &str, b: &str) -> Ordering {
 fn version_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?:^|[^0-9.])(\d+(?:\.\d+){1,3})(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?(?:\+[0-9A-Za-z.-]+)?")
-            .expect("version regex")
+        Regex::new(
+            r"(?:^|[^0-9.])(\d+(?:\.\d+)+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?(?:\+[0-9A-Za-z.-]+)?",
+        )
+        .expect("version regex")
     })
 }
 
@@ -91,10 +105,10 @@ pub fn parse_version(tag: &str) -> Option<GameVersion> {
     let trimmed = tag.trim().trim_start_matches(['v', 'V']);
     let caps = version_re().captures(trimmed)?;
     let core = caps.get(1)?.as_str();
-    let mut parts = [0u64; 4];
+    let mut parts = [0u64; MAX_PARTS];
     let mut count = 0;
     for (i, p) in core.split('.').enumerate() {
-        if i >= 4 {
+        if i >= MAX_PARTS {
             return None;
         }
         parts[i] = p.parse().ok()?;
@@ -190,9 +204,9 @@ mod tests {
         );
         assert_eq!(parse_version("v0.9.4-ds1").unwrap().pre(), Some("ds1"));
         assert_eq!(parse_version("0.9.6+build.7").unwrap().to_string(), "0.9.6");
-        assert!(
-            parse_version("v1.2.3.4.5").is_none()
-                || parse_version("v1.2.3.4.5").unwrap().parts().len() <= 4
+        assert_eq!(
+            parse_version("v1.2.3.4.5").unwrap().parts(),
+            &[1, 2, 3, 4, 5]
         );
     }
 
@@ -201,5 +215,33 @@ mod tests {
         assert!(is_newer("nightly", Some("v0.9.6")).unwrap());
         assert!(!is_newer("nightly", Some("NIGHTLY")).unwrap());
         assert!(is_newer("", Some("x")).is_err());
+    }
+
+    #[test]
+    fn five_part_and_longer_versions() {
+        assert_eq!(
+            parse_version("v0.9.8.3.1").unwrap().parts(),
+            &[0, 9, 8, 3, 1]
+        );
+        assert!(is_newer("v0.9.8.3.1", Some("v0.9.8.3")).unwrap());
+        assert!(!is_newer("v0.9.8.3", Some("v0.9.8.3.1")).unwrap());
+        assert!(!is_newer("v0.9.8.3.1", Some("v0.9.8.3.1")).unwrap());
+        assert!(is_newer("v0.9.8.4", Some("v0.9.8.3.1")).unwrap());
+        assert!(parse_version("0.9.8.3.1") < parse_version("0.9.8.3.2"));
+        assert_eq!(parse_version("1.2.3.4.5.6.7.8").unwrap().parts().len(), 8);
+        assert!(parse_version("1.2.3.4.5.6.7.8.9").is_none());
+        assert_eq!(
+            parse_version("FNF 0.9.8.3.1 (hotfix)").unwrap().to_string(),
+            "0.9.8.3.1"
+        );
+    }
+
+    #[test]
+    fn numeric_not_text_compare_and_trailing_zero_equal() {
+        assert!(parse_version("0.9.8.10") > parse_version("0.9.8.9"));
+        assert!(is_newer("v0.9.8.10", Some("v0.9.8.9")).unwrap());
+        assert_eq!(parse_version("0.9.8.3"), parse_version("0.9.8.3.0"));
+        assert!(!is_newer("v0.9.8.3.0", Some("v0.9.8.3")).unwrap());
+        assert!(!is_newer("v0.9.8.3", Some("v0.9.8.3.0")).unwrap());
     }
 }

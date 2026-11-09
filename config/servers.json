@@ -6,7 +6,8 @@
       "host": "71.71.45.128",
       "port": 7777,
       "default": true,
-      "agentUrl": "https://71.71.45.128:8788"
+      "agentUrl": "https://71.71.45.128:8788",
+      "accountPort": 7798
     },
     {
       "id": "localhost",

@@ -56,13 +56,18 @@ pub struct Agent {
     process: tokio::sync::Mutex<Option<Running>>,
     logs: Mutex<std::collections::VecDeque<AgentLogLine>>,
     next_log: AtomicU64,
-    busy: AtomicBool,
+    pub(crate) busy: AtomicBool,
     phase: Mutex<String>,
     started_at: Mutex<Option<Instant>>,
     version: Mutex<String>,
     online: AtomicBool,
     pub(crate) updates: Mutex<UpdateState>,
     pub(crate) scheduler_started: AtomicBool,
+    pub(crate) accounts: tokio::sync::Mutex<Option<Child>>,
+    /// True after a start; cleared by an admin stop. A dead process while this is set is a crash.
+    pub(crate) expect_running: AtomicBool,
+    pub(crate) crash_restarts: Mutex<Vec<Instant>>,
+    pub(crate) booted_at: Instant,
 }
 
 #[derive(Debug)]
@@ -72,7 +77,7 @@ pub struct Fail {
 }
 
 impl Fail {
-    fn msg(http: u16, message: impl Into<String>) -> Self {
+    pub(crate) fn msg(http: u16, message: impl Into<String>) -> Self {
         Self {
             http,
             message: message.into(),
@@ -100,6 +105,10 @@ impl Agent {
             started_at: Mutex::new(if online { Some(Instant::now()) } else { None }),
             version: Mutex::new(version),
             online: AtomicBool::new(online),
+            accounts: tokio::sync::Mutex::new(None),
+            expect_running: AtomicBool::new(online),
+            crash_restarts: Mutex::new(Vec::new()),
+            booted_at: Instant::now(),
         }))
     }
 
@@ -246,10 +255,12 @@ impl Agent {
                     "deploy finished version={} online={}",
                     status.version, status.online
                 ));
+                self.record_event("deploy", format!("deployed {} online={}", status.version, status.online));
                 Ok(status)
             }
             Err(err) => {
                 self.log(format!("deploy failed: {}", err.message));
+                self.record_event("deploy-failed", err.message.clone());
                 Err(err)
             }
         }
@@ -284,6 +295,8 @@ impl Agent {
 
     pub async fn stop(&self) -> Result<AgentStatus, Fail> {
         let _guard = self.begin_real()?;
+        self.expect_running.store(false, Ordering::Release);
+        self.record_event("stop", "admin stopped the game server");
         self.log("stop requested");
         self.set_phase("stopping");
         let result = self.stop_running(true).await;
@@ -299,6 +312,107 @@ impl Agent {
                 Err(err)
             }
         }
+    }
+
+    /// Newest game-server log tails (Unreal Saved/Logs and the agent's stdout capture)
+    /// plus the crash folders under Saved/Crashes, newest first. Read-only.
+    pub fn server_log(&self) -> serde_json::Value {
+        let install = &self.config.install_dir;
+        let mut logs = Vec::new();
+        let mut crashes = Vec::new();
+        for rel in launcher_core::resolve_preserved(install, Path::new("Saved")) {
+            let saved = install.join(&rel);
+            if let Some(file) = newest_file(&saved.join("Logs"), Some("log")) {
+                logs.push(log_entry(&file, 300));
+            }
+            if let Ok(dir) = fs::read_dir(saved.join("Crashes")) {
+                let mut found: Vec<_> = dir.flatten().filter(|e| e.path().is_dir()).collect();
+                found.sort_by_key(|e| std::cmp::Reverse(modified(&e.path())));
+                for entry in found.into_iter().take(10) {
+                    let path = entry.path();
+                    let tail = newest_file(&path, Some("log"))
+                        .map(|f| tail_lines(&f, 60))
+                        .unwrap_or_default();
+                    crashes.push(serde_json::json!({
+                        "name": entry.file_name().to_string_lossy(),
+                        "modified": stamp_of(&path),
+                        "logTail": tail,
+                    }));
+                }
+            }
+        }
+        if let Some(file) = newest_file(&self.config.log_dir, None) {
+            logs.push(log_entry(&file, 200));
+        }
+        serde_json::json!({ "logs": logs, "crashes": crashes })
+    }
+
+    /// Wipe: graceful quit (then kill), back up every Saved tree, remove each Saved/SaveGames
+    /// (Config and the rest of Saved stay), start the server again. Nothing is removed unless
+    /// the backup succeeded.
+    pub async fn wipe(&self) -> Result<AgentStatus, Fail> {
+        let _guard = self.begin_real()?;
+        self.log("wipe requested");
+        let result = self.wipe_inner().await;
+        self.set_phase("idle");
+        match result {
+            Ok(()) => {
+                let status = self.status().await;
+                self.log(format!("wipe finished online={}", status.online));
+                self.record_event("wipe", "SaveGames wiped after a Saved backup");
+                Ok(status)
+            }
+            Err(err) => {
+                self.log(format!("wipe failed: {}", err.message));
+                Err(err)
+            }
+        }
+    }
+
+    async fn wipe_inner(&self) -> Result<(), Fail> {
+        if !self.config.install_dir.exists() {
+            return Err(Fail::msg(404, "No server is installed; nothing to wipe."));
+        }
+        self.set_phase("stopping");
+        self.stop_running(true).await?;
+        self.log("wipe: server stopped");
+        self.set_phase("backing-up");
+        match backup_saved(&self.config.install_dir, &self.config.backup_dir) {
+            Ok(Some(path)) => self.log(format!("wipe: backed up Saved to {}", path.display())),
+            Ok(None) => self.log("wipe: no Saved folder to back up"),
+            Err(err) => {
+                self.log(format!("wipe: backup failed ({err}); nothing was deleted, restarting"));
+                let _ = self.start_installed().await;
+                return Err(Fail::msg(
+                    500,
+                    format!("Save backup failed: {err}. Nothing was wiped; the server was restarted."),
+                ));
+            }
+        }
+        self.set_phase("wiping");
+        let removed = wipe_save_games(&self.config.install_dir).map_err(|err| {
+            Fail::msg(500, format!("wipe: could not clear SaveGames: {err}"))
+        });
+        match removed {
+            Ok(list) if list.is_empty() => self.log("wipe: no SaveGames folder found"),
+            Ok(list) => {
+                for path in list {
+                    self.log(format!("wipe: cleared {}", path.display()));
+                }
+            }
+            Err(err) => {
+                self.log(&err.message);
+                let _ = self.start_installed().await;
+                return Err(err);
+            }
+        }
+        self.set_phase("starting");
+        self.start_installed().await?;
+        self.log("wipe: server started");
+        self.health_check()
+            .await
+            .map_err(|err| Fail::msg(500, format!("Wiped, but the restart failed its health check: {err}")))?;
+        Ok(())
     }
 
     /// The atomic flag is the real lock. BusyGuard only exists so the HTTP layer
@@ -362,24 +476,48 @@ impl Agent {
             "downloading {} ({} bytes)",
             release.asset.name, release.asset.size
         ));
-        download_with_resume(
-            DownloadRequest {
-                client: &self.client,
-                url: &url,
-                dest: &archive,
-                expected_size: release.asset.size,
-                token: self.config.github_token.as_deref(),
-            },
-            |_| {},
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        verify_download(
-            &archive,
-            release.asset.size,
-            release.asset.digest.as_deref(),
-        )
-        .map_err(|err| err.to_string())?;
+        if release.asset.split.is_some() {
+            let parts_dir = downloads.join(format!("{}.parts", file_name(&release.asset.name)));
+            let parts = release.asset.split.as_ref().map(|s| s.parts.len()).unwrap_or(0);
+            self.log(format!("{} is split into {parts} parts; downloading each with resume", release.asset.name));
+            let manifest = launcher_core::download_split(
+                launcher_core::SplitDownload {
+                    client: &self.client,
+                    asset: &release.asset,
+                    dest: &archive,
+                    parts_dir: &parts_dir,
+                    token: self.config.github_token.as_deref(),
+                },
+                |_| {},
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            let _ = fs::remove_dir_all(&parts_dir);
+            self.log(format!(
+                "joined {} parts, sha256 {} verified",
+                manifest.parts.len(),
+                manifest.sha256
+            ));
+        } else {
+            download_with_resume(
+                DownloadRequest {
+                    client: &self.client,
+                    url: &url,
+                    dest: &archive,
+                    expected_size: release.asset.size,
+                    token: self.config.github_token.as_deref(),
+                },
+                |_| {},
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            verify_download(
+                &archive,
+                release.asset.size,
+                release.asset.digest.as_deref(),
+            )
+            .map_err(|err| err.to_string())?;
+        }
         let partial_name = format!(
             "{}.partial",
             dest.file_name()
@@ -548,6 +686,7 @@ impl Agent {
     async fn rollback(&self, reason: &str, saved_backup: Option<&Path>) -> Result<(), Fail> {
         self.set_phase("rolling-back");
         self.log(format!("health check failed: {reason}"));
+        self.record_event("rollback", format!("rolling back: {reason}"));
         self.log("rolling back to previous install");
         let _ = self.kill_running().await;
         let install = &self.config.install_dir;
@@ -839,6 +978,8 @@ impl Agent {
     }
 
     fn mark_started(&self) {
+        self.expect_running.store(true, Ordering::Release);
+        self.record_event("start", format!("game server started ({})", read_version(&self.config.install_dir)));
         if let Ok(mut slot) = self.started_at.lock() {
             *slot = Some(Instant::now());
         }
@@ -909,6 +1050,10 @@ impl Agent {
                 }
                 *guard = None;
                 drop(guard);
+                if self.expect_running.load(Ordering::Acquire) {
+                    let phase = self.phase.lock().map(|p| p.clone()).unwrap_or_default();
+                    self.record_event("exit", format!("game server process exited (phase {phase})"));
+                }
                 self.mark_offline();
                 return;
             }
@@ -988,9 +1133,7 @@ fn read_version(dir: &Path) -> String {
 }
 
 fn player_count(install: &Path) -> Option<u32> {
-    let text = fs::read_to_string(install.join("Saved").join("uxa-status.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("playerCount")?.as_u64().map(|n| n as u32)
+    crate::monitor::read_player_status(install).and_then(|p| p.count)
 }
 
 /// Copy every Saved folder of the install (root `Saved` and the Unreal project's
@@ -1005,6 +1148,60 @@ fn backup_saved(install: &Path, backup_root: &Path) -> Result<Option<PathBuf>, S
     fs::create_dir_all(&dest).map_err(|err| err.to_string())?;
     copy_preserved(install, &dest, &["Saved".into()]).map_err(|err| err.to_string())?;
     Ok(Some(dest))
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH)
+}
+
+fn stamp_of(path: &Path) -> String {
+    chrono::DateTime::<chrono::Utc>::from(modified(path)).to_rfc3339()
+}
+
+fn newest_file(dir: &Path, ext: Option<&str>) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| ext.map_or(true, |x| p.extension().map_or(false, |e| e.eq_ignore_ascii_case(x))))
+        .max_by_key(|p| modified(p))
+}
+
+fn tail_lines(path: &Path, lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(path) else { return String::new() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(256 * 1024);
+    let _ = file.seek(SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    let _ = file.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
+fn log_entry(path: &Path, lines: usize) -> serde_json::Value {
+    serde_json::json!({
+        "file": path.display().to_string(),
+        "modified": stamp_of(path),
+        "tail": tail_lines(path, lines),
+    })
+}
+
+/// Remove `SaveGames` under every Saved tree of the install. Config and logs stay.
+fn wipe_save_games(install: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut removed = Vec::new();
+    for rel in launcher_core::resolve_preserved(install, Path::new("Saved")) {
+        let saved = install.join(&rel);
+        let games = saved.join("SaveGames");
+        if games.is_dir() {
+            fs::remove_dir_all(&games).map_err(|err| format!("{}: {err}", games.display()))?;
+            fs::create_dir_all(&games).map_err(|err| err.to_string())?;
+            removed.push(games);
+        }
+    }
+    Ok(removed)
 }
 
 fn locate_executable(install: &Path, name: &str) -> Option<PathBuf> {
@@ -1363,6 +1560,24 @@ mod preserve_tests {
     }
 
     #[test]
+    fn wipe_clears_save_games_and_keeps_config() {
+        let root = std::env::temp_dir().join(format!("uxa-wipe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sg = root.join("FridayNightFights/Saved/SaveGames");
+        fs::create_dir_all(&sg).unwrap();
+        fs::write(sg.join("FNF_Account.sav"), b"acct").unwrap();
+        let cfg = root.join("FridayNightFights/Saved/Config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(cfg.join("Game.ini"), b"cfg").unwrap();
+        let removed = wipe_save_games(&root).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(sg.is_dir());
+        assert!(!sg.join("FNF_Account.sav").exists());
+        assert!(cfg.join("Game.ini").is_file());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn prune_keeps_the_newest_timestamped_backups() {
         let temp = tempfile::tempdir().unwrap();
         for name in [
@@ -1380,5 +1595,142 @@ mod preserve_tests {
         assert!(!temp.path().join("20260102-000000").exists());
         assert!(temp.path().join("20260103-000000").is_dir());
         assert!(temp.path().join("notes").is_dir());
+    }
+}
+
+pub(crate) fn detach_command(command: &mut Command) {
+    detach(command);
+}
+
+pub(crate) fn kill_pid_pub(pid: u32) {
+    kill_pid(pid);
+}
+
+pub(crate) fn tail_text(path: &Path, lines: usize) -> String {
+    tail_lines(path, lines)
+}
+
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+impl Agent {
+    /// Put a Saved backup (a folder name from GET /v1/monitor "backups") back in place.
+    /// The current Saved is backed up first, so a restore can itself be undone.
+    pub async fn restore_backup(&self, name: &str) -> Result<AgentStatus, Fail> {
+        let name = name.trim();
+        if !is_backup_stamp(name) {
+            return Err(Fail::msg(400, "backup must be a YYYYMMDD-HHMMSS folder name from the backup list"));
+        }
+        let backup = self.config.backup_dir.join(name);
+        if !backup.is_dir() {
+            return Err(Fail::msg(404, format!("no backup named {name}")));
+        }
+        let _guard = self.begin_real()?;
+        self.log(format!("restore of backup {name} requested"));
+        self.set_phase("stopping");
+        let result = async {
+            self.stop_running(true).await?;
+            self.set_phase("backing-up");
+            let before = backup_saved(&self.config.install_dir, &self.config.backup_dir)
+                .map_err(|e| Fail::msg(500, format!("could not back up the current Saved first: {e}")))?;
+            if let Some(path) = &before {
+                self.log(format!("current Saved backed up to {}", path.display()));
+            }
+            self.set_phase("restoring");
+            restore_saved_backup(&self.config.install_dir, &backup)
+                .map_err(|e| Fail::msg(500, format!("restore failed: {e}")))?;
+            self.set_phase("starting");
+            self.start_installed().await?;
+            self.health_check().await.map_err(|e| Fail::msg(500, format!("restored, but the server failed its health check: {e}")))?;
+            Ok::<(), Fail>(())
+        }
+        .await;
+        self.set_phase("idle");
+        match &result {
+            Ok(()) => self.record_event("restore", format!("Saved restored from backup {name}")),
+            Err(e) => self.record_event("restore-failed", e.message.clone()),
+        }
+        result?;
+        Ok(self.status().await)
+    }
+
+    pub(crate) async fn server_pid(&self) -> Option<u32> {
+        self.process.lock().await.as_ref().map(|r| r.pid)
+    }
+
+    /// Persistent event history (starts, exits, crashes, deploys, rollbacks, wipes).
+    pub(crate) fn record_event(&self, kind: &str, message: impl Into<String>) {
+        let line = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "kind": kind,
+            "message": message.into(),
+        });
+        let _ = fs::create_dir_all(&self.config.work_dir);
+        let path = self.config.work_dir.join("events.jsonl");
+        if fs::metadata(&path).map(|m| m.len() > 2_000_000).unwrap_or(false) {
+            let _ = fs::rename(&path, self.config.work_dir.join("events.old.jsonl"));
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    pub(crate) fn recent_events(&self, max: usize) -> Vec<serde_json::Value> {
+        let text = fs::read_to_string(self.config.work_dir.join("events.jsonl")).unwrap_or_default();
+        let mut out: Vec<serde_json::Value> = text
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .take(max)
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// Restart a game server that died on its own. At most 3 restarts an hour.
+    pub(crate) async fn game_watchdog(&self) {
+        if !self.expect_running.load(Ordering::Acquire) || self.busy.load(Ordering::Acquire) {
+            return;
+        }
+        self.refresh_liveness().await;
+        if self.online.load(Ordering::Acquire) || !self.config.install_dir.exists() {
+            return;
+        }
+        let Ok(_guard) = self.begin_real() else { return };
+        let recent = {
+            let mut list = self.crash_restarts.lock().unwrap();
+            list.retain(|t| t.elapsed() < Duration::from_secs(3600));
+            list.push(Instant::now());
+            list.len()
+        };
+        if recent > 3 {
+            self.expect_running.store(false, Ordering::Release);
+            self.record_event("crash-loop", "game server crashed 3 times within an hour; watchdog stopped restarting it");
+            self.log("watchdog: crash loop, not restarting the game server again");
+            return;
+        }
+        self.record_event("crash-restart", "game server was down; watchdog restarting it");
+        self.log("watchdog: game server is down; restarting it");
+        self.set_phase("starting");
+        let started = self.start_installed().await;
+        let result = match started {
+            Ok(()) => self.health_check().await.map_err(|e| e),
+            Err(e) => Err(e.message),
+        };
+        self.set_phase("idle");
+        if let Err(e) = result {
+            self.record_event("crash-restart-failed", e);
+        }
     }
 }

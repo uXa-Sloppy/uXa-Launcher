@@ -1,7 +1,9 @@
 //! uXa Server Agent. Runs on the game machine, verifies signed requests,
 //! and swaps in a Friday Night Fights dedicated-server build.
 
+mod accounts;
 mod config;
+mod monitor;
 mod http;
 mod runtime;
 mod schedule;
@@ -31,7 +33,7 @@ pub fn init_logging(log_dir: &Path) {
 #[cfg(windows)]
 mod service;
 
-pub use config::{load_config, AgentConfig, AutoUpdateConfig};
+pub use config::{load_config, AccountServerConfig, AgentConfig, AutoUpdateConfig};
 pub use http::{serve, serve_listener};
 pub use runtime::{Agent, Fail};
 pub use update::SelfUpdateOutcome;

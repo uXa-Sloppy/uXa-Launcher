@@ -550,3 +550,11 @@ button:disabled { cursor: default; }
   .hero { min-height: 200px; }
   .play { height: 64px; font-size: 28px; }
 }
+
+.server-status { margin-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 8px; }
+.server-status h3 { margin: 4px 0 8px; font-size: 15px; }
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.status-grid > div { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.status-grid .ok { color: var(--green); }
+.server-status details { margin-top: 6px; }
+.server-status .minted { user-select: all; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.08); }
