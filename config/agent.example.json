@@ -10,7 +10,7 @@
   "assetPattern": "",
   "includePrereleases": true,
   "apiBase": "https://api.github.com",
-  "listen": "0.0.0.0:8787",
+  "listen": "0.0.0.0:8788",
   "warnSeconds": 15,
   "healthWaitSecs": 8,
   "quitWaitSecs": 20,
@@ -36,5 +36,15 @@
     "dailyRestart": true,
     "keepBackups": 7,
     "graceSeconds": 180
+  },
+  "accountServer": {
+    "enabled": true,
+    "assetContains": ["Accounts", "Win64"],
+    "installDir": "",
+    "dataDir": "",
+    "python": "python/python.exe",
+    "host": "0.0.0.0",
+    "port": 7798,
+    "watchdog": true
   }
 }

@@ -521,6 +521,140 @@ function adminServers(boot: Bootstrap): Array<ServerEntry & { game: string }> {
   );
 }
 
+type MonitorData = {
+  at?: string;
+  status?: AgentStatus;
+  agentUptimeSecs?: number;
+  watchdog?: boolean;
+  players?: { count: number | null; players: { account: string; character: string }[]; source: string; map?: string; updatedUtc?: string };
+  system?: { cpuPercent?: number; cpuCount?: number; memTotalMb?: number; memUsedMb?: number; diskMount?: string; diskFreeGb?: number | null; diskTotalGb?: number | null; serverMemMb?: number | null; serverCpuPercent?: number | null };
+  events?: { at: string; kind: string; message: string }[];
+  restarts24h?: number;
+  crashes?: { name: string; modified: string }[];
+  logFile?: string;
+  logTail?: string;
+  accounts?: { enabled: boolean; installed: boolean; version: string; running: boolean; healthy: boolean; port: number; accounts: number; signups: number; keysUnused: number; keysPending: number; keysUsed: number; lastSignupUtc: string };
+  backups?: { name: string; sizeMb: number }[];
+  backupDir?: string;
+};
+
+function ServerStatusPanel({ serverId, tag }: { serverId: string; tag: string }) {
+  const [data, setData] = useState<MonitorData | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [note, setNote] = useState("");
+  const [minted, setMinted] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!serverId) return;
+    try {
+      const raw = await api.adminAgent(serverId, "GET", "/v1/monitor");
+      setData(JSON.parse(raw) as MonitorData);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(), 15000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  async function run(label: string, path: string, body = "") {
+    setBusy(true);
+    setNotice(`${label}…`);
+    try {
+      const raw = await api.adminAgent(serverId, "POST", path, body);
+      const reply = JSON.parse(raw) as { message?: string };
+      setNotice(reply.message ?? `${label} done.`);
+      await load();
+    } catch (err) {
+      setNotice("");
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function mint() {
+    setBusy(true);
+    try {
+      setMinted(await api.adminMintInvite(serverId, note.trim()));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const st = data?.status;
+  const sys = data?.system;
+  const acc = data?.accounts;
+  const players = data?.players;
+  const playerLine = players?.players?.length
+    ? players.players.map((p) => (p.character ? `${p.character} (${p.account})` : p.account)).join(", ")
+    : "none";
+  return (
+    <section className="server-status" aria-label="Server status">
+      <h3>Server status {data?.at ? <small className="muted">updated {new Date(data.at).toLocaleTimeString()}</small> : null}</h3>
+      {error && <p className="error-line">{error}</p>}
+      <div className="status-grid">
+        <div><strong>Game server</strong>
+          <span className={st?.online ? "ok" : ""}>{st?.online ? "Online" : "Offline"}</span>
+          <span>Version {st?.version || "—"}</span>
+          <span>Uptime {st?.online ? formatUptime(st.uptimeSecs) : "—"}</span>
+          <span>Restarts (24h) {data?.restarts24h ?? "—"} · Crashes logged {data?.crashes?.length ?? 0}</span>
+          <span>Watchdog {data?.watchdog ? "on" : "off"}</span>
+        </div>
+        <div><strong>Players {players?.count ?? (players?.source === "log-joins" ? "?" : "—")}</strong>
+          <span>{playerLine}</span>
+          <small className="muted">{players?.source === "log-joins" ? "From join lines in the log (not live)" : players?.source === "status-file-stale" ? "Status file is stale" : players?.map ? `Map ${players.map}` : ""}</small>
+        </div>
+        <div><strong>Machine</strong>
+          <span>CPU {sys?.cpuPercent ?? "—"}% ({sys?.cpuCount ?? "?"} cores)</span>
+          <span>RAM {sys?.memUsedMb != null ? `${(sys.memUsedMb / 1024).toFixed(1)} / ${((sys.memTotalMb ?? 0) / 1024).toFixed(1)} GB` : "—"}</span>
+          <span>Disk free {sys?.diskFreeGb ?? "—"} / {sys?.diskTotalGb ?? "—"} GB</span>
+          <span>Server process {sys?.serverMemMb != null ? `${sys.serverMemMb} MB` : "—"}</span>
+        </div>
+        <div><strong>Account server</strong>
+          <span className={acc?.healthy ? "ok" : ""}>{acc ? (acc.healthy ? `Up on TCP ${acc.port}` : acc.installed ? "Down" : "Not installed") : "—"}</span>
+          <span>Version {acc?.version || "—"}</span>
+          <span>Sign-ups {acc?.signups ?? "—"} · Accounts {acc?.accounts ?? "—"}</span>
+          <span>Keys unused {acc?.keysUnused ?? "—"} · pending {acc?.keysPending ?? "—"}</span>
+        </div>
+      </div>
+      <div className="row-actions">
+        <button type="button" className="btn" disabled={busy} onClick={() => void load()}>Refresh</button>
+        <button type="button" className="btn" disabled={busy} onClick={() => void run("Restarting account server", "/v1/accounts/restart")}>Restart account server</button>
+        <button type="button" className="btn" disabled={busy || !tag} onClick={() => void run(`Updating account server to ${tag}`, "/v1/accounts/deploy", JSON.stringify({ tag }))}>Update account server to {tag || "…"}</button>
+        <button type="button" className="btn" disabled={busy} onClick={() => void run("Updating server agent", "/v1/agent/update")}>Update agent now</button>
+      </div>
+      <div className="row-actions">
+        <input aria-label="Invite note" placeholder="Discord name for the invite" value={note} onChange={(e) => setNote(e.target.value)} />
+        <button type="button" className="btn" disabled={busy || !note.trim()} onClick={() => void mint()}>Mint invite key</button>
+        {minted && <code className="minted" aria-label="New invite key">{minted}</code>}
+      </div>
+      {notice && <p className="token-status">{notice}</p>}
+      <details>
+        <summary>Recent events ({data?.events?.length ?? 0})</summary>
+        <pre className="admin-log">{(data?.events ?? []).slice().reverse().map((e) => `${e.at}  ${e.kind}  ${e.message}`).join("\n") || "none"}</pre>
+      </details>
+      <details>
+        <summary>Save backups ({data?.backups?.length ?? 0})</summary>
+        <pre className="admin-log">{(data?.backups ?? []).map((b) => `${b.name}  ${b.sizeMb} MB`).join("\n") || "none"}{data?.backupDir ? `\n\n${data.backupDir}` : ""}</pre>
+      </details>
+      <details>
+        <summary>Game log tail</summary>
+        <pre className="admin-log">{data?.logTail || "no log yet"}</pre>
+      </details>
+    </section>
+  );
+}
+
 function formatUptime(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
@@ -719,6 +853,7 @@ function AdminDialog({
               {serverLog && (
                 <pre className="admin-log" aria-label="Server log">{serverLog}</pre>
               )}
+              {server && <ServerStatusPanel serverId={server.id} tag={tag} />}
               <pre className="admin-log" aria-live="polite">
                 {logs.length === 0 ? "Waiting for agent log…" : logs.map((line) => `${line.at}  ${line.message}`).join("\n")}
               </pre>

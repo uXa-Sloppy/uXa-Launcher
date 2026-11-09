@@ -44,6 +44,8 @@ export interface LauncherApi {
   adminStop(serverId: string): Promise<AgentAction>;
   adminWipe(serverId: string): Promise<AgentAction>;
   adminServerLog(serverId: string): Promise<string>;
+  adminAgent(serverId: string, method: "GET" | "POST", path: string, body?: string): Promise<string>;
+  adminMintInvite(serverId: string, note: string): Promise<string>;
 }
 
 const tauriApi: LauncherApi = {
@@ -82,6 +84,9 @@ const tauriApi: LauncherApi = {
   adminStop: (serverId) => invoke<AgentAction>("admin_stop", { serverId }),
   adminWipe: (serverId) => invoke<AgentAction>("admin_wipe", { serverId }),
   adminServerLog: (serverId) => invoke<string>("admin_server_log", { serverId }),
+  adminAgent: (serverId, method, path, body = "") =>
+    invoke<string>("admin_agent", { serverId, method, path, body }),
+  adminMintInvite: (serverId, note) => invoke<string>("admin_mint_invite", { serverId, note }),
 };
 
 const previewGames: Bootstrap["games"] = [
@@ -330,6 +335,27 @@ const previewApi: LauncherApi = {
   },
   async adminServerLog() {
     return JSON.stringify({ logs: [{ file: "FridayNightFights.log", modified: "", tail: "LogInit: preview" }], crashes: [] });
+  },
+  async adminAgent(_serverId, _method, path) {
+    if (path === "/v1/monitor") {
+      return JSON.stringify({
+        at: new Date().toISOString(),
+        status: previewStatus(),
+        agentUptimeSecs: 3600,
+        players: { count: 1, players: [{ account: "Dave", character: "Sloppy" }], source: "status-file", map: "Purgatory" },
+        system: { cpuPercent: 12.5, cpuCount: 8, memTotalMb: 32768, memUsedMb: 12000, diskFreeGb: 210.4, diskTotalGb: 931.5, serverMemMb: 2300 },
+        events: [{ at: new Date().toISOString(), kind: "start", message: "preview" }],
+        restarts24h: 1,
+        crashes: [],
+        logTail: "LogNet: Join succeeded: Dave",
+        accounts: { enabled: true, installed: true, version: "v0.9.9", running: true, healthy: true, port: 7798, accounts: 3, signups: 1, keysUnused: 2, keysPending: 0, keysUsed: 1, lastSignupUtc: "" },
+        backups: [{ name: "20261109-200000", sizeMb: 12 }],
+      });
+    }
+    return JSON.stringify({ ok: true, message: "Preview: done." });
+  },
+  async adminMintInvite() {
+    return "FNF-PREV-IEWK-EY23";
   },
   async adminWipe() {
     previewLog("wipe requested");

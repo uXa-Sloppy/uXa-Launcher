@@ -11,7 +11,7 @@ use std::time::Duration;
 use launcher_core::{
     agent_exchange, sign_request, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus,
 };
-use uxa_server_agent::{serve_listener, Agent, AgentConfig, AutoUpdateConfig};
+use uxa_server_agent::{serve_listener, Agent, AccountServerConfig, AgentConfig, AutoUpdateConfig};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -159,6 +159,7 @@ fn test_config(root: &Path, api: &str, listen: &str) -> AgentConfig {
         log_dir: root.join("logs"),
         secret: "test-secret-not-for-production".into(),
         auto_update: AutoUpdateConfig::disabled(),
+        account_server: AccountServerConfig::disabled(),
     };
     config.finish_paths().unwrap();
     config
@@ -253,7 +254,9 @@ async fn deploy_preserves_saves_and_rolls_back() {
     assert_eq!(rejected.status(), 401);
     assert!(!temp.path().join("FridayNightFightsServer").exists());
 
-    let deployed = call(&http, &base, &secret, "POST", "/v1/deploy", b"{}")
+    // Since 0.3.8 an empty tag means the highest version, which here is the broken
+    // pre-release. Name the good build explicitly.
+    let deployed = call(&http, &base, &secret, "POST", "/v1/deploy", br#"{"tag":"v1.2.0"}"#)
         .await
         .unwrap();
     let action: AgentAction = serde_json::from_str(&deployed).unwrap();

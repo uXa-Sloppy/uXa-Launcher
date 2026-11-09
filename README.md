@@ -238,3 +238,37 @@ The server-agent test deploys a mock `Server` + `Win64` zip, keeps `Saved` and `
 ```
 
 `assetPattern` is an optional regex applied in addition to `assetContains`. Assets must be `.zip` files. `config/servers.json` is the server list. An optional `agentUrl` is the uXa Server Agent for that host. The dedicated server build is chosen with `Server` and `Win64`, which is separate from the client filter above. `config/agent.example.json` is the agent config, without a key.
+
+## 0.3.9: full remote deploy, big assets, account server, monitoring
+
+**Assets over 2 GB.** GitHub refuses release files of 2 GiB or more. Split a big zip with
+`scripts/split-release-asset.ps1 -File <zip>` and upload `<zip>.001`, `<zip>.002`, ... and
+`<zip>.parts.json` instead of the zip. The launcher (client patch) and the agent (server
+deploy) download every part with resume, retry a part that fails its SHA-256 (3 tries),
+join the parts, check the whole-file SHA-256 from the manifest, then extract as before.
+A release with a single zip works exactly as before, and a single zip wins when both
+exist. Launcher/agent 0.3.8 and older cannot read split releases, so ship 0.3.9 first.
+
+**Account server.** The agent runs the FNF account server (invite-key sign-ups) from
+`FNFAccountServer` next to the game server, on TCP 7798 (`accountServer` in agent.json).
+Data stays in the game's `Saved/Accounts`, so deploys keep it and every Saved backup
+includes it. Package it with `scripts/package-account-server.ps1` (embeddable Python, no
+install on the game PC) and attach `FNF_<version>_Accounts_Win64.zip` to the game release.
+A watchdog restarts it when its health check fails.
+
+**New agent routes** (all signed): `GET /v1/monitor`, `GET /v1/accounts/status`,
+`POST /v1/accounts/deploy {"tag"}`, `POST /v1/accounts/restart`,
+`POST /v1/accounts/invite {"keySha256","note"}` (hash only; the plaintext key never
+leaves the admin PC), `POST /v1/agent/update` (self-update now), `POST /v1/backups/restore {"name":"YYYYMMDD-HHMMSS"}` (backs up the current Saved first). The watchdog also
+restarts a game server that died on its own (at most 3 times an hour) and records
+starts, exits, crashes, deploys, rollbacks and wipes in `events.jsonl`.
+
+**Monitoring.** `GET /v1/monitor` returns status, uptime, version, players (from the game's
+`Saved/uxa-status.json`, else "Join succeeded" log lines), CPU/RAM/disk, recent events and
+crashes, the game log tail, account server state and sign-up counts, and the backup list.
+The launcher shows it under Server admin > Server status (refreshes every 15 s).
+
+**CLI.** `uxa-launcher --agent GET /v1/monitor`, `--agent POST <path> <json>`, and
+`--mint-invite <discord name>` (prints the key; only its hash goes to the server).
+
+**Client.** The launcher passes `-FNFAccountServer=<host>:<accountPort|7798>` to the game.

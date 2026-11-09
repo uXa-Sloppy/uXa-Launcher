@@ -492,6 +492,22 @@ where
         .download_dir
         .join(format!("{}.partial", file_name_only(&release.asset.name)));
 
+    if release.asset.split.is_some() {
+        // Over 2 GB: numbered parts + parts.json. Each part resumes and is hash-checked.
+        let parts_dir = job.download_dir.join(format!("{}.parts", file_name_only(&release.asset.name)));
+        crate::split::download_split(
+            crate::split::SplitDownload {
+                client,
+                asset: &release.asset,
+                dest: &dest,
+                parts_dir: &parts_dir,
+                token: job.source.token.as_deref(),
+            },
+            &mut progress,
+        )
+        .await?;
+        let _ = fs::remove_dir_all(&parts_dir);
+    } else {
     let received = download_with_resume(
         DownloadRequest {
             client,
@@ -520,6 +536,7 @@ where
             let _ = fs::remove_file(&dest);
         }
         return Err(err);
+    }
     }
 
     let parent = job

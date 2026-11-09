@@ -1202,6 +1202,44 @@ async fn admin_stop(state: State<'_, AppState>, server_id: String) -> Result<Age
     serde_json::from_str(&body).map_err(|err| err.to_string())
 }
 
+/// Read-only and maintenance agent routes the admin Server Status view may call.
+const ADMIN_AGENT_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/v1/monitor"),
+    ("GET", "/v1/accounts/status"),
+    ("POST", "/v1/accounts/restart"),
+    ("POST", "/v1/accounts/deploy"),
+    ("POST", "/v1/agent/update"),
+];
+
+#[tauri::command]
+async fn admin_agent(
+    state: State<'_, AppState>,
+    server_id: String,
+    method: String,
+    path: String,
+    body: String,
+) -> Result<String, String> {
+    let method = method.to_ascii_uppercase();
+    if !ADMIN_AGENT_ROUTES.iter().any(|(m, p)| *m == method && *p == path) {
+        return Err(format!("{method} {path} is not an admin route."));
+    }
+    agent_call(&state, &server_id, &method, &path, body.as_bytes()).await
+}
+
+/// Mint an invite key here; only its SHA-256 goes to the server. Returns the key once.
+#[tauri::command]
+async fn admin_mint_invite(
+    state: State<'_, AppState>,
+    server_id: String,
+    note: String,
+) -> Result<String, String> {
+    let (key, hash) = launcher_core::mint_invite_key().map_err(|e| e.to_string())?;
+    let payload = serde_json::json!({ "keySha256": hash, "note": note }).to_string();
+    agent_call(&state, &server_id, "POST", "/v1/accounts/invite", payload.as_bytes()).await?;
+    tracing::info!(server = %server_id, "invite key minted (hash sent)");
+    Ok(key)
+}
+
 #[tauri::command]
 async fn refresh_news(state: State<'_, AppState>) -> Result<Vec<NewsItem>, String> {
     let (catalog, _) = load_library(&state.paths)?;
@@ -1266,7 +1304,9 @@ pub fn run() {
             admin_restart,
             admin_stop,
             admin_wipe,
-            admin_server_log
+            admin_server_log,
+            admin_agent,
+            admin_mint_invite
         ])
         .run(tauri::generate_context!())
         .expect("error while running uXa Launcher");

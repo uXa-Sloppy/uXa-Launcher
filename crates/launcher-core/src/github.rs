@@ -25,6 +25,8 @@ pub struct ReleaseAsset {
     pub browser_download_url: String,
     pub size: u64,
     pub digest: Option<String>,
+    /// Set when this "asset" is really `name.parts.json` plus numbered parts (files over 2 GB).
+    pub split: Option<Box<crate::split::SplitAsset>>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +138,7 @@ fn next_page(link: &str) -> Option<String> {
     None
 }
 
-fn into_release(release: GhRelease, asset: GhAsset) -> ReleaseInfo {
+fn into_release_asset(release: GhRelease, asset: ReleaseAsset) -> ReleaseInfo {
     tracing::info!("selected release {} asset {}", release.tag_name, asset.name);
     ReleaseInfo {
         tag: release.tag_name,
@@ -144,13 +146,7 @@ fn into_release(release: GhRelease, asset: GhAsset) -> ReleaseInfo {
         body: release.body.unwrap_or_default(),
         prerelease: release.prerelease,
         html_url: release.html_url.unwrap_or_default(),
-        asset: ReleaseAsset {
-            name: asset.name,
-            api_url: asset.url,
-            browser_download_url: asset.browser_download_url,
-            size: asset.size,
-            digest: asset.digest.filter(|d| !d.is_empty()),
-        },
+        asset,
     }
 }
 
@@ -194,10 +190,18 @@ pub async fn list_matching_releases(
                 continue;
             }
             let assets = std::mem::take(&mut release.assets);
-            if let Some(asset) = assets.into_iter().find(|asset| {
-                crate::patch::asset_matches(&asset.name, &source.asset_contains, pattern.as_ref())
-            }) {
-                found.push(into_release(release, asset));
+            let matches = |name: &str| {
+                crate::patch::asset_matches(name, &source.asset_contains, pattern.as_ref())
+            };
+            let all: Vec<ReleaseAsset> = assets.into_iter().map(asset_from_gh).collect();
+            // A single zip wins. Otherwise accept a split zip (parts.json + .001, .002, ...).
+            let picked = all
+                .iter()
+                .find(|asset| matches(&asset.name))
+                .cloned()
+                .or_else(|| crate::split::find_split_asset(&all, matches));
+            if let Some(asset) = picked {
+                found.push(into_release_asset(release, asset));
                 if found.len() >= 40 {
                     sort_newest_first(&mut found);
                     return Ok(found);
@@ -336,6 +340,7 @@ fn asset_from_gh(asset: GhAsset) -> ReleaseAsset {
         browser_download_url: asset.browser_download_url,
         size: asset.size,
         digest: asset.digest.filter(|d| !d.is_empty()),
+        split: None,
     }
 }
 
@@ -468,6 +473,7 @@ mod sort_tests {
                     browser_download_url: String::new(),
                     size: 1,
                     digest: None,
+                    split: None,
                 },
             })
             .collect();

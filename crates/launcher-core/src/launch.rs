@@ -172,9 +172,19 @@ pub fn prepare_client_launch(spec: ClientLaunch<'_>) -> Result<PlayPlan> {
         .to_path_buf();
     Ok(PlayPlan::Process {
         program,
-        args: vec![format_address(spec.selected)],
+        args: vec![format_address(spec.selected), account_server_arg(spec.selected)],
         working_dir,
     })
+}
+
+/// `-FNFAccountServer=host:7798`. The client sends invite sign-ups there. Passing it
+/// explicitly also overrides the client's built-in "never call Dolmar's IP" test guard.
+pub fn account_server_arg(server: &ServerEntry) -> String {
+    format!(
+        "-FNFAccountServer={}:{}",
+        server.host.trim(),
+        server.account_port.filter(|p| *p != 0).unwrap_or(7798)
+    )
 }
 
 pub fn spawn_process(plan: &PlayPlan) -> Result<u32> {

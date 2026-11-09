@@ -555,6 +555,7 @@ mod tests {
             browser_download_url: String::new(),
             size,
             digest: None,
+            split: None,
         }
     }
 

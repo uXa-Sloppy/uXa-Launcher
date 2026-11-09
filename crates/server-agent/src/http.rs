@@ -23,6 +23,13 @@ struct WipeBody {
     confirm: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct InviteBody {
+    key_sha256: String,
+    note: String,
+}
+
 #[derive(Deserialize)]
 struct DeployBody {
     #[serde(default)]
@@ -113,6 +120,52 @@ async fn dispatch(
                 })
             })
         }
+        ("GET", "/v1/monitor") => {
+            return axum::Json(agent.monitor().await).into_response();
+        }
+        ("GET", "/v1/accounts/status") => {
+            return axum::Json(agent.accounts_status().await).into_response();
+        }
+        ("POST", "/v1/accounts/restart") => match agent.accounts_restart().await {
+            Ok(s) => return axum::Json(serde_json::json!({"ok": true, "message": "Account server restarted.", "accounts": s})).into_response(),
+            Err(err) => Err(err),
+        },
+        ("POST", "/v1/accounts/deploy") => {
+            let tag = serde_json::from_slice::<DeployBody>(&body).map(|b| b.tag).unwrap_or_default();
+            match agent.accounts_deploy(&tag).await {
+                Ok(s) => return axum::Json(serde_json::json!({"ok": true, "message": format!("Account server {} installed.", s.version), "accounts": s})).into_response(),
+                Err(err) => Err(err),
+            }
+        }
+        ("POST", "/v1/accounts/invite") => {
+            let parsed = match serde_json::from_slice::<InviteBody>(&body) {
+                Ok(b) => b,
+                Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+            };
+            match agent.accounts_invite(&parsed.key_sha256, &parsed.note).await {
+                Ok(()) => return axum::Json(serde_json::json!({"ok": true, "message": "Invite key added."})).into_response(),
+                Err(err) => Err(err),
+            }
+        }
+        ("POST", "/v1/backups/restore") => {
+            let name = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            agent.restore_backup(&name).await.map(|status| {
+                Reply::Action(AgentAction {
+                    ok: true,
+                    message: format!("Saved restored from backup {name}; server restarted."),
+                    status,
+                })
+            })
+        }
+        ("POST", "/v1/agent/update") => {
+            match agent.update_agent_now().await {
+                Ok(message) => return axum::Json(serde_json::json!({"ok": true, "message": message})).into_response(),
+                Err(err) => Err(crate::runtime::Fail { http: 502, message: err }),
+            }
+        }
         ("POST", "/v1/restart") => agent.restart().await.map(|status| {
             Reply::Action(AgentAction {
                 ok: true,
@@ -144,7 +197,8 @@ async fn dispatch(
         }),
         (
             "GET" | "POST",
-            "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe" | "/v1/serverlog",
+            "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe" | "/v1/serverlog"
+            | "/v1/monitor" | "/v1/accounts/status" | "/v1/accounts/restart" | "/v1/accounts/deploy" | "/v1/accounts/invite" | "/v1/agent/update" | "/v1/backups/restore",
         ) => {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.");
         }
@@ -191,6 +245,7 @@ pub async fn serve_listener(agent: Arc<Agent>, listener: TcpListener) -> Result<
 
 pub async fn serve(agent: Arc<Agent>) -> Result<(), String> {
     agent.spawn_scheduler();
+    agent.spawn_watchdog();
     if agent.config.tls_enabled() {
         let addr: SocketAddr = agent
             .config
