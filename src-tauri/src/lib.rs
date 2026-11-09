@@ -614,7 +614,8 @@ async fn play(
         .clone();
     let install_dir = resolve_install_dir(&settings, &state.paths.default_install_root, game)
         .map_err(|err| err.to_string())?;
-    let list = servers.get(&game.servers_key).cloned().unwrap_or_default();
+    let mut list = servers.get(&game.servers_key).cloned().unwrap_or_default();
+    apply_remote_account_urls(&state, &game.servers_key, &mut list).await;
     let selected = pick_server(&settings, &game.id, &list, server_id.as_deref())?;
     let relative = if game.servers_config.trim().is_empty() {
         "Config/Servers.ini"
@@ -639,6 +640,60 @@ async fn play(
         pid: Some(pid),
         opened_url: None,
     })
+}
+
+/// Public sign-up addresses the admin publishes in FridayNightFights-Releases (main/servers.json),
+/// so a new agent tunnel address reaches every player without a launcher release.
+const REMOTE_SERVERS_URL: &str =
+    "https://raw.githubusercontent.com/uXa-Sloppy/FridayNightFights-Releases/main/servers.json";
+
+/// Fill an empty `accountUrl` from the published servers.json (matched by server id). Only that
+/// field is taken from it; host, port and agentUrl stay local. Last good copy is cached for offline starts.
+async fn apply_remote_account_urls(state: &AppState, servers_key: &str, list: &mut [ServerEntry]) {
+    if list.iter().all(|s| !s.account_url.trim().is_empty()) {
+        return;
+    }
+    let cache = state.paths.data_dir.join("servers.remote.json");
+    let fetched = async {
+        let resp = state
+            .client
+            .get(REMOTE_SERVERS_URL)
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let text = resp.text().await.ok()?;
+        load_servers(&text).ok()?;
+        Some(text)
+    }
+    .await;
+    let text = match fetched {
+        Some(text) => {
+            let _ = fs::write(&cache, &text);
+            text
+        }
+        None => match fs::read_to_string(&cache) {
+            Ok(text) => text,
+            Err(_) => return,
+        },
+    };
+    let Ok(map) = load_servers(&text) else { return };
+    let Some(remote) = map.get(servers_key) else { return };
+    for server in list.iter_mut() {
+        if !server.account_url.trim().is_empty() {
+            continue;
+        }
+        if let Some(r) = remote.iter().find(|r| r.id == server.id) {
+            let url = r.account_url.trim();
+            if url.starts_with("http://") || url.starts_with("https://") {
+                tracing::info!(server = %server.id, "sign-ups via published accountUrl");
+                server.account_url = url.to_string();
+            }
+        }
+    }
 }
 
 fn pick_server<'a>(

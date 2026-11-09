@@ -1,6 +1,6 @@
 //! Pre-alpha invite keys, minted on the admin PC. Only the SHA-256 is sent to the
 //! server agent, which appends it to invite_keys.txt; the plaintext key goes to the
-//! player (the Overseer bot DMs it). Same format as Tools/fnf_invite_key.py.
+//! player (The Nightwatch bot DMs it). Same format as Tools/fnf_invite_key.py.
 
 use sha2::{Digest, Sha256};
 

@@ -5,6 +5,7 @@ export interface ServerEntry {
   port: number;
   default?: boolean;
   agentUrl?: string;
+  accountUrl?: string;
 }
 
 export interface GameView {

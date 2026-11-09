@@ -195,11 +195,41 @@ async fn split_server_deploy_and_managed_account_server() {
         .unwrap();
     assert!(signup.status().is_success(), "{}", signup.text().await.unwrap());
 
+    // 0.3.10: the same sign-up flow through the agent's public proxy (no admin signature), in
+    // the exact path a 0.10.0 game client sends for -FNFAccountServer=<agent>:<port>/fnf-accounts:<port>.
+    let port = addr.port();
+    let health = http.get(format!("{base}/fnf-accounts/v1/health")).send().await.unwrap();
+    assert!(health.status().is_success());
+    let key2 = "FNF-TEST-WXYZ-PROX";
+    let digest2 = hex::encode(sha2::Sha256::digest(key2.as_bytes()));
+    call("POST", "/v1/accounts/invite", serde_json::to_vec(&serde_json::json!({"keySha256": digest2, "note": "proxy"})).unwrap())
+        .await
+        .unwrap();
+    let proxied = http
+        .post(format!("{base}/fnf-accounts:{port}/v1/signup"))
+        .json(&serde_json::json!({"key": key2, "name": "Proxied", "password": "secret2"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proxied.status().as_u16(), 200, "{}", proxied.text().await.unwrap());
+    let again = http
+        .post(format!("{base}/fnf-accounts/v1/signup"))
+        .json(&serde_json::json!({"key": key2, "name": "Proxied2", "password": "secret2"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status().as_u16(), 400, "a used key is rejected by the account server through the proxy");
+    let unknown = http.get(format!("{base}/fnf-accounts/v1/accounts")).send().await.unwrap();
+    assert_eq!(unknown.status().as_u16(), 404);
+    // Admin routes still need a signature.
+    let unsigned = http.get(format!("{base}/v1/monitor")).send().await.unwrap();
+    assert_eq!(unsigned.status().as_u16(), 401);
+
     let mon: serde_json::Value = serde_json::from_str(&call("GET", "/v1/monitor", Vec::new()).await.unwrap()).unwrap();
     assert_eq!(mon["players"]["count"], 1, "{mon}");
     assert_eq!(mon["players"]["players"][0]["character"], "Sloppy");
-    assert_eq!(mon["accounts"]["accounts"], 3);
-    assert_eq!(mon["accounts"]["signups"], 1);
+    assert_eq!(mon["accounts"]["accounts"], 6);
+    assert_eq!(mon["accounts"]["signups"], 2);
     assert_eq!(mon["status"]["online"], true);
     assert!(mon["system"]["memTotalMb"].as_u64().unwrap_or(0) > 0, "{}", mon["system"]);
     assert!(mon["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy"));

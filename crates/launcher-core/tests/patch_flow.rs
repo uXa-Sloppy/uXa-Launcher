@@ -238,6 +238,7 @@ fn servers_ini_matches_the_game_format() {
             default: true,
             agent_url: String::new(),
             account_port: None,
+            account_url: String::new(),
         },
         ServerEntry {
             id: "localhost".into(),
@@ -247,6 +248,7 @@ fn servers_ini_matches_the_game_format() {
             default: false,
             agent_url: String::new(),
             account_port: None,
+            account_url: String::new(),
         },
     ];
     assert_eq!(
