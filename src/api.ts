@@ -97,7 +97,7 @@ const previewGames: Bootstrap["games"] = [
     thumbnail: "/art/fnf-thumb.jpg",
     hero: "/art/fnf-hero.jpg",
     servers: [
-      { id: "dolmar", name: "Dolmar's Server", host: "71.71.45.128", port: 7777, default: true, agentUrl: "https://71.71.45.128:8787" },
+      { id: "dolmar", name: "Dolmar's Server", host: "71.71.45.128", port: 7777, default: true, agentUrl: "https://71.71.45.128:8788" },
       { id: "localhost", name: "Localhost", host: "127.0.0.1", port: 7777 },
     ],
   },
