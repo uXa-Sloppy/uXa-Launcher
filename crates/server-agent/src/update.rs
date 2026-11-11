@@ -1,6 +1,6 @@
-//! Stage server builds on a timer and apply them only in the daily window.
-//! The agent may replace its own executable at any check. That path does not
-//! stop the dedicated server.
+//! Report available server builds on a timer. Installing a game build happens
+//! only on a signed command. The agent may replace its own executable when an
+//! admin asks; that path does not stop the dedicated server.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use launcher_core::{
     download_url, download_with_resume, fetch_latest_release, is_newer, parse_sha256sums,
     replace_executable, restore_previous_launcher, running_from_cargo_target, verify_exe_file,
@@ -19,9 +19,7 @@ use launcher_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::{Agent, StopStyle};
-use crate::schedule::{
-    decide_tick, interval_from_hours, local_date, parse_clock, parse_zone, Tick,
-};
+use crate::schedule::{on_demand_tick, OnDemandTick};
 
 const STATE_FILE: &str = "auto-update-state.json";
 const STAGE_DIR: &str = "staged-server";
@@ -37,6 +35,9 @@ pub(crate) struct UpdateState {
     pub staged_version: String,
     pub last_maintenance_date: String,
     pub failed_agent_tag: String,
+    /// Set when 0.3.12 drops a release that 0.3.11 had staged for 03:00.
+    pub cancelled_staged_version: String,
+    pub pending_install_cancelled: bool,
 }
 
 impl Default for UpdateState {
@@ -49,6 +50,8 @@ impl Default for UpdateState {
             staged_version: String::new(),
             last_maintenance_date: String::new(),
             failed_agent_tag: String::new(),
+            cancelled_staged_version: String::new(),
+            pending_install_cancelled: false,
         }
     }
 }
@@ -165,17 +168,110 @@ impl Agent {
     }
 
     pub fn spawn_scheduler(self: &Arc<Self>) {
-        if !self.config.auto_update.enabled {
-            self.log("automatic updates are disabled");
-            return;
-        }
         if self.scheduler_started.swap(true, Ordering::AcqRel) {
             return;
         }
         let agent = Arc::clone(self);
         tokio::spawn(async move {
-            scheduler_loop(agent).await;
+            report_loop(agent).await;
         });
+    }
+
+    /// Drop a build 0.3.11 staged for the 03:00 window. Safe to call when nothing is staged.
+    pub(crate) fn cancel_pending_scheduled_install(&self) {
+        let staged = self.staged_version();
+        let stage_dir = self.config.work_dir.join(STAGE_DIR);
+        let marker = self.config.work_dir.join(STAGE_MARKER);
+        if staged.is_empty() && !stage_dir.exists() && !marker.exists() {
+            return;
+        }
+        let label = if staged.is_empty() {
+            read_stage_tag(&self.config.work_dir).unwrap_or_else(|| "staged release".into())
+        } else {
+            staged
+        };
+        let _ = fs::remove_dir_all(&stage_dir);
+        let _ = fs::remove_file(&marker);
+        let message = format!(
+            "cancelled pending 03:00 install of {label}; updateMode=on-demand (no nightly install)"
+        );
+        self.note_update(&message);
+        self.mutate_state(|state| {
+            state.staged_version.clear();
+            state.last_update_at = stamp();
+            state.last_update_result = message.clone();
+            state.cancelled_staged_version = label;
+            state.pending_install_cancelled = true;
+        });
+        self.record_event("cancel-scheduled-install", message);
+    }
+
+    fn record_check(&self, message: &str) {
+        self.note_update(message);
+        self.mutate_state(|state| {
+            state.last_check_at = stamp();
+            state.last_check_result = message.to_string();
+        });
+    }
+
+    /// Ask GitHub what is published and record it. Does not download or install.
+    pub async fn report_available(&self) -> Result<launcher_core::AgentStatus, String> {
+        if self.busy.load(Ordering::Acquire) {
+            let message = "check skipped; an admin action is running; not installing";
+            self.record_check(message);
+            return Ok(self.status().await);
+        }
+        let _guard = self.begin_real().map_err(|err| err.message)?;
+        let previous = self.phase_name();
+        if previous != "failed-start" {
+            self.set_phase("checking");
+        }
+        let outcome = self.report_server().await;
+        if self.phase_name() != "failed-start" {
+            let restore = if previous == "checking" {
+                "idle"
+            } else {
+                previous.as_str()
+            };
+            self.set_phase(restore);
+        }
+        let message = match outcome {
+            Ok(text) => text,
+            Err(err) => format!("check failed: {err}"),
+        };
+        self.record_check(&message);
+        Ok(self.status().await)
+    }
+
+    async fn report_server(&self) -> Result<String, String> {
+        let source = self.release_source();
+        let releases = launcher_core::list_matching_releases(&self.client, &source)
+            .await
+            .map_err(|err| err.to_string())?;
+        let installed = read_installed(&self.config.install_dir);
+        let Some(newest) = select_newest(releases) else {
+            return Ok("no matching server release; not installing".into());
+        };
+        let have = if installed.is_empty() {
+            "nothing".to_string()
+        } else {
+            installed
+        };
+        if is_newer(&newest.tag, Some(&have)).unwrap_or(false) && have != "nothing" {
+            return Ok(format!(
+                "available {} (installed {have}); not installing (on-demand)",
+                newest.tag
+            ));
+        }
+        if have == "nothing" {
+            return Ok(format!(
+                "available {}; nothing installed; not installing (on-demand)",
+                newest.tag
+            ));
+        }
+        Ok(format!(
+            "installed {have} is current; not installing (on-demand)"
+        ))
     }
 
     /// Download a newer dedicated-server build into the work directory.
@@ -203,7 +299,9 @@ impl Agent {
     pub async fn apply_maintenance(&self) -> Result<launcher_core::AgentStatus, String> {
         let _guard = self.begin_real().map_err(|err| err.message)?;
         let result = self.apply_maintenance_inner().await;
-        self.set_phase("idle");
+        if self.phase_name() != "failed-start" {
+            self.set_phase("idle");
+        }
         match result {
             Ok(message) => {
                 self.note_update(&message);
@@ -244,11 +342,21 @@ impl Agent {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     std::process::exit(0);
                 });
-                Ok("Agent updated; it restarts in a few seconds. The game server keeps running.".into())
+                Ok(
+                    "Agent updated; it restarts in a few seconds. The game server keeps running."
+                        .into(),
+                )
             }
             SelfUpdateOutcome::Skipped => {
-                let last = self.logs_after(0).last().map(|l| l.message.clone()).unwrap_or_default();
-                Ok(format!("No agent update applied ({last}). Running {}.", env!("CARGO_PKG_VERSION")))
+                let last = self
+                    .logs_after(0)
+                    .last()
+                    .map(|l| l.message.clone())
+                    .unwrap_or_default();
+                Ok(format!(
+                    "No agent update applied ({last}). Running {}.",
+                    env!("CARGO_PKG_VERSION")
+                ))
             }
         }
     }
@@ -481,55 +589,6 @@ impl Agent {
         require_verified_exe(&exe_path, asset.size, sha.as_deref())?;
         Ok(exe_path)
     }
-
-    fn decide(&self, booted: DateTime<Utc>, startup_done: bool) -> Option<Tick> {
-        let auto = &self.config.auto_update;
-        let restart = parse_clock(&auto.restart_time)?;
-        let tz = parse_zone(&auto.restart_time_zone).ok()?;
-        let mut check_times = Vec::new();
-        for text in &auto.check_times {
-            check_times.push(parse_clock(text)?);
-        }
-        let (last_check_at, last_maintenance) = {
-            let state = self.updates.lock().ok()?;
-            (
-                state.last_check_at.clone(),
-                state.last_maintenance_date.clone(),
-            )
-        };
-        Some(decide_tick(
-            Utc::now(),
-            booted,
-            chrono::Duration::seconds(auto.check_after_start_secs as i64),
-            interval_from_hours(auto.interval_hours),
-            parse_stamp(&last_check_at),
-            startup_done,
-            &check_times,
-            restart,
-            tz,
-            chrono::Duration::minutes(auto.restart_window_minutes as i64),
-            NaiveDate::parse_from_str(&last_maintenance, "%Y-%m-%d").ok(),
-        ))
-    }
-
-    fn mark_maintenance_today(&self) {
-        let Ok(tz) = parse_zone(&self.config.auto_update.restart_time_zone) else {
-            return;
-        };
-        let date = local_date(Utc::now(), tz).format("%Y-%m-%d").to_string();
-        self.mutate_state(|state| state.last_maintenance_date = date);
-    }
-
-    async fn finish_self_update(&self) {
-        if !self.config.auto_update.agent_enabled {
-            return;
-        }
-        match self.run_agent_self_update().await {
-            Ok(SelfUpdateOutcome::Restarting) => std::process::exit(0),
-            Ok(SelfUpdateOutcome::Skipped) => {}
-            Err(err) => self.note_update(format!("agent self-update failed: {err}")),
-        }
-    }
 }
 
 impl Agent {
@@ -546,29 +605,43 @@ impl Agent {
     }
 }
 
-async fn scheduler_loop(agent: Arc<Agent>) {
-    let auto = &agent.config.auto_update;
+fn check_interval(agent: &Agent) -> chrono::Duration {
+    let minutes = agent.policy_snapshot().check_interval_minutes.clamp(5, 15) as i64;
+    chrono::Duration::minutes(minutes)
+}
+
+/// Poll GitHub and record the result. Never stages, installs, or restarts the game.
+async fn report_loop(agent: Arc<Agent>) {
+    let minutes = agent.policy_snapshot().check_interval_minutes;
     agent.note_update(format!(
-        "automatic updates on; check every {}h; game server restarts only at {} {}",
-        auto.interval_hours, auto.restart_time, auto.restart_time_zone
+        "updateMode=on-demand; reporting every {minutes} min; game installs only on a signed command; no 03:00 install and no daily restart"
     ));
     let booted = Utc::now();
     let mut startup_done = false;
     loop {
-        match agent.decide(booted, startup_done) {
-            Some(Tick::Maintenance) => {
-                agent.mark_maintenance_today();
-                let _ = agent.check_for_updates().await;
-                startup_done = true;
-                let _ = agent.apply_maintenance().await;
-                agent.finish_self_update().await;
+        let last = {
+            let text = agent
+                .updates
+                .lock()
+                .map(|state| state.last_check_at.clone())
+                .unwrap_or_default();
+            parse_stamp(&text)
+        };
+        let startup_delay =
+            chrono::Duration::seconds(agent.config.auto_update.check_after_start_secs as i64);
+        if on_demand_tick(
+            Utc::now(),
+            booted,
+            startup_delay,
+            check_interval(&agent),
+            last,
+            startup_done,
+        ) == OnDemandTick::Report
+        {
+            startup_done = true;
+            if let Err(err) = agent.report_available().await {
+                agent.note_update(format!("check failed: {err}"));
             }
-            Some(Tick::Check) => {
-                let _ = agent.check_for_updates().await;
-                startup_done = true;
-                agent.finish_self_update().await;
-            }
-            Some(Tick::Sleep) | None => {}
         }
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
@@ -661,6 +734,7 @@ fn spawn_helper(
         .arg(failed_file)
         .arg(tag)
         .arg(mode)
+        .arg(work.join("agent-health.json"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -680,19 +754,39 @@ fn spawn_helper(
 fn helper_script() -> &'static str {
     #[cfg(windows)]
     {
-        return r#"param($parent, $exe, $old, $failed, $tag, $mode)
+        return r#"param($parent, $exe, $old, $failed, $tag, $mode, $health)
 while (Get-Process -Id $parent -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+Remove-Item -LiteralPath $health -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$health.pid" -Force -ErrorAction SilentlyContinue
 function Start-Agent {
   if ($mode -eq "service") {
     & sc.exe start uXaServerAgent | Out-Null
     return $LASTEXITCODE
   }
   $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
-  Start-Sleep -Seconds 1
-  if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) { return 0 }
-  return 1
+  Set-Content -LiteralPath "$health.pid" -Value $proc.Id -NoNewline
+  return 0
 }
-if ((Start-Agent) -eq 0) { exit 0 }
+function Test-Healthy {
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-Path -LiteralPath $health) {
+      $raw = Get-Content -LiteralPath $health -Raw -ErrorAction SilentlyContinue
+      if ($raw -and ($raw -match '"ok"\s*:\s*true')) { return $true }
+    }
+    if ($mode -ne "service" -and (Test-Path -LiteralPath "$health.pid")) {
+      $procId = Get-Content -LiteralPath "$health.pid" -ErrorAction SilentlyContinue
+      if ($procId -and -not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { return $false }
+    }
+    if ($mode -eq "service") {
+      $q = & sc.exe query uXaServerAgent | Out-String
+      if ($q -match "STOPPED") { return $false }
+    }
+    Start-Sleep -Seconds 1
+  }
+  return $false
+}
+if ((Start-Agent) -eq 0 -and (Test-Healthy)) { exit 0 }
 if (Test-Path -LiteralPath $old) {
   Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $old -Destination $exe -Force
@@ -711,23 +805,50 @@ old="$3"
 failed="$4"
 tag="$5"
 mode="$6"
+health="$7"
 while kill -0 "$parent" 2>/dev/null; do
   sleep 0.2
 done
+rm -f "$health" "$health.pid"
+still_running() {
+  pid="$1"
+  if [ -r "/proc/$pid/stat" ]; then
+    state=$(awk -F')' 'NR==1 { split($2, a, " "); print a[2] }' "/proc/$pid/stat" 2>/dev/null)
+    case "$state" in
+      R|S|D|T|t|W|P) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  kill -0 "$pid" 2>/dev/null
+}
 start_one() {
   if [ "$mode" = "service" ]; then
     sc start uXaServerAgent >/dev/null 2>&1
     return $?
   fi
   nohup "$exe" >/dev/null 2>&1 &
-  child=$!
+  echo $! > "$health.pid"
   sleep 1
-  if kill -0 "$child" 2>/dev/null; then
-    return 0
-  fi
+  return 0
+}
+healthy() {
+  i=0
+  while [ "$i" -lt 60 ]; do
+    if [ -f "$health" ] && grep -q '"ok":true' "$health"; then
+      return 0
+    fi
+    if [ "$mode" != "service" ] && [ -f "$health.pid" ]; then
+      pid=$(cat "$health.pid" 2>/dev/null)
+      if [ -n "$pid" ] && ! still_running "$pid"; then
+        return 1
+      fi
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
   return 1
 }
-if start_one; then
+if start_one && healthy; then
   exit 0
 fi
 if [ -f "$old" ]; then

@@ -17,7 +17,10 @@ mod split;
 mod version;
 mod web;
 
-pub use agent::{agent_exchange, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus};
+pub use agent::{
+    agent_exchange, AgentAction, AgentHealth, AgentLogLine, AgentReleaseSummary, AgentStatus,
+    FailedStart,
+};
 pub use cli::{
     cli_result_record, command_label, execute_cli, failure_cli_result, help_text, parse_cli,
     redact_cli, stdio_plan, try_local_cli, usage_cli_result, write_cli_result, CliCommand,
@@ -65,5 +68,5 @@ pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
 pub use version::{is_newer, parse_version, GameVersion};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
-pub const USER_AGENT: &str = "uXa-Launcher/0.3.10";
+pub const USER_AGENT: &str = "uXa-Launcher/0.3.12";
 pub const DEFAULT_WEB_VERSION_PATTERN: &str = r"Build\s+(\d+)\s*,\s*last updated\s+([^<\r\n]+)";

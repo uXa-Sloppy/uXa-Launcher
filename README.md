@@ -71,19 +71,22 @@ The launcher does not copy files onto the game machine itself. A small **uXa Ser
 
 The agent listens on its own port (default `8788`) and does four things when asked to deploy:
 
-1. Download the zip whose name contains `Server` and `Win64` from the selected GitHub release of `uXa-Sloppy/FridayNightFights`.
+1. Download the zip whose name contains `Server` and `Win64` from the selected GitHub release of `uXa-Sloppy/FridayNightFights-Releases`.
 2. Warn the running `FridayNightFightsServer` on stdin (`say`, then `quit`), then copy `Saved` to a timestamped backup.
-3. Swap the new build into place and keep `Saved` and `Config`.
-4. Start it with the configured arguments and `-port=7777`, wait until the process is still running, and put the previous build back if it exits.
+3. Swap the new build into place, keep `Saved` and `Config`, and leave the previous build at `{install}.previous`.
+4. Start it with the configured arguments and `-port=7777`. If that start fails, the agent stays on the new build. It does not put the previous build back. `POST /v1/rollback` does that, and only when it is signed.
 
-The agent also does this by itself. With `autoUpdate` left at its defaults it checks GitHub about 30 seconds after it starts, then every 6 hours. A newer dedicated-server zip is downloaded and unpacked under the work directory. The running server is not stopped for that check. The game server is restarted only inside a daily window, default `03:00` in `America/New_York` (US Eastern, including daylight saving) and only for 10 minutes after that time. If a build is staged, that restart installs it. If nothing is staged, the server still restarts once that day so the host comes back clean. A boot later in the morning does not catch up. The agent executable may replace itself at a check; that restart does not send `quit` to the game server.
+From 0.3.12 the agent does not install on a clock. `updateMode` is `on-demand` even when an older `agent.json` still says `autoUpdate.enabled`, `serverEnabled`, and `dailyRestart`. On startup it deletes any build staged for the old 03:00 America/New_York window and records `cancelled pending 03:00 install of <tag>`. After that it only polls GitHub (`checkIntervalMinutes`, 5–15, default 10) and writes what it found. `POST /v1/check` does the same poll immediately. Neither path downloads or installs. A game install happens only on signed `POST /v1/deploy`. A game restart happens only on signed `POST /v1/restart`. The agent executable replaces itself only on signed `POST /v1/agent/update`.
 
-`Saved` is copied to a timestamped folder before an install or the daily restart. The last 7 copies are kept (`keepBackups`, and `0` keeps every copy). A `Saved` folder inside the downloaded zip is discarded when the live install has one, including `<Project>/Saved`. If the new build dies during the health wait, the previous install is put back and the timestamped `Saved` copy is restored over it. The live `Saved` directory is not deleted to make room for the zip.
+`Saved` is copied to a timestamped folder before an install. The last 7 copies are kept (`keepBackups`, and `0` keeps every copy). A `Saved` folder inside the downloaded zip is discarded when the live install has one, including `<Project>/Saved`. If the new build dies during the health wait, the server log slice, stdout/stderr, and crash dumps are copied to `.uxa-agent/failed-starts/` before anything can restart, and `/v1/status` reports `failedStart`. The previous install stays on disk until a signed rollback. The live `Saved` directory is not deleted to make room for the zip, and it is not restored automatically.
 
 Version tags with two, three, or four numeric parts are ordered numerically. `v0.9.7.2` and `v0.9.7.2-build18g` are both newer than `0.9.6` and `0.9.6.1`. The same numbers without a suffix are newer than that suffix. Scheduled checks pick the highest version, not whichever release GitHub listed first. Launcher release checks use the same comparison.
 
 ```json
 "autoUpdate": {
+  "updateMode": "on-demand",
+  "checkIntervalMinutes": 10,
+  "onFailedStart": "stay",
   "enabled": true,
   "intervalHours": 6,
   "checkAfterStartSecs": 30,
@@ -102,9 +105,13 @@ Version tags with two, three, or four numeric parts are ordered numerically. `v0
 }
 ```
 
-`checkTimes` are extra check clocks in `restartTimeZone`. They do not restart the server. `graceSeconds` is how long a restart waits when `Saved/uxa-status.json` says players are online. An unknown player count uses `warnSeconds` instead. The agent release is the public `uXa-Sloppy/uXa-Launcher` latest stable build; `UXA_GITHUB_TOKEN` is sent only if the anonymous request fails. `FNF` release checks keep using that token when it is already configured, because that repo may be private. Nothing in `agent.json` may be named secret or token.
+`checkIntervalMinutes` is the report-only poll. `enabled`, `dailyRestart`, `serverEnabled`, and `restartTime` are still accepted so an old file loads, and they do not install or restart the game. `graceSeconds` is how long a signed deploy waits when `Saved/uxa-status.json` says players are online during a maintenance-style stop. An unknown player count uses `warnSeconds` instead. The agent release is the public `uXa-Sloppy/uXa-Launcher` latest stable build; `UXA_GITHUB_TOKEN` is sent only if the anonymous request fails. `FNF` release checks keep using that token when it is already configured, because that repo may be private. Nothing in `agent.json` may be named secret or token.
 
-Each check and install is appended to `updates.log` in the log directory and to the admin log. Status adds `agentVersion`, `lastCheckAt`, `lastCheckResult`, `lastUpdateAt`, `lastUpdateResult`, `stagedVersion`, and `nextRestartAt`. A manual Deploy still installs immediately. Set `enabled` to false to keep the scheduler off.
+Each check and install is appended to `updates.log` in the log directory and to the admin log. Status adds `agentVersion`, `updateMode`, `lastCheckAt`, `lastCheckResult`, `lastUpdateAt`, `lastUpdateResult`, `previousVersion`, and `failedStart` when a start failed. A manual Deploy still installs immediately. `PATCH /v1/config` accepts only `updateMode` (`on-demand`), `onFailedStart` (`stay`), `checkIntervalMinutes` (5–15), `owner` (`uXa-Sloppy`), and `repo` (a single repository name, kept under owner `uXa-Sloppy`).
+
+One Windows admin command, `uxa-server-agent.exe --setup-fnf`, sets the `uXaServerAgent` service to LocalSystem with restart-on-failure and writes `updateMode`, `onFailedStart`, and `repo` into `agent.json`. It only changes that service and files under `C:\FNF`.
+
+Signed diagnostics: `GET /v1/diag/logs`, `GET /v1/diag/crashes`, `GET /v1/diag/crashes/download`, `GET /v1/diag/events`, and `GET /v1/diag/prereqs`. Log and dump reads are limited to the install's `Saved/Logs` and `Saved/Crashes` and the agent work directory. Event-log entries are Application events for the Friday Night Fights server executable. Returned text redacts addresses and `key=` / `token=` values.
 
 Every request carries `X-Uxa-Timestamp` and `X-Uxa-Signature`, an HMAC-SHA256 of `{unix_seconds}\n{METHOD}\n{path}\n{sha256(body)}`. The timestamp must be within five minutes. Set `tlsCert` and `tlsKey` in `agent.json` to serve HTTPS with those same signatures. Without a certificate the listener is HTTP, which is what the local mock uses; put a real certificate on a machine that faces the network, or terminate TLS in front of it. The launcher trusts the system certificate store.
 
@@ -129,7 +136,7 @@ Generate a certificate the launcher will trust, set `tlsCert` and `tlsKey`, and 
 
 ### Try a deploy against the mock
 
-The Rust test `deploy_preserves_saves_and_rolls_back` does this without the UI: a local GitHub stand-in serves a good server zip and a zip that exits immediately, and the agent must keep `Saved`, broadcast `say` then `quit`, and restore the good build.
+The Rust test `deploy_preserves_saves_and_rolls_back` does this without the UI: a local GitHub stand-in serves a good server zip and a zip that exits immediately, and the agent must keep `Saved`, broadcast `say` then `quit`, stay on the failed build, and restore the good build only after `POST /v1/rollback`.
 
 To click through it, serve the mock (it now includes a real `Server` + `Win64` zip), point an agent at it, and override the launcher:
 
@@ -151,7 +158,7 @@ UXA_INSTALL_ROOT=/tmp/uxa-demo/Games \
   npm run tauri dev
 ```
 
-Unlock with `dev-admin-key`. Deploy & Restart. The agent log should show the download, the save backup, and a healthy process. Stop shuts it down. A build that exits during the health wait is rolled back; that path is what the automated test forces.
+Unlock with `dev-admin-key`. Deploy & Restart. The agent log should show the download, the save backup, and a healthy process. Stop shuts it down. A build that exits during the health wait stays installed, with the previous build kept for a signed rollback.
 
 ## Layout on disk
 

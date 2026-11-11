@@ -111,6 +111,7 @@ fn config(root: &Path, api: &str, listen: &str, account_port: u16) -> AgentConfi
         secret: "test-secret-not-for-production".into(),
         auto_update: AutoUpdateConfig::disabled(),
         account_server: accounts,
+        source_path: Path::new("").into(),
     };
     config.finish_paths().unwrap();
     config

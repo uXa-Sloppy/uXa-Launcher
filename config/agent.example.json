@@ -21,6 +21,9 @@
   "workDir": "",
   "logDir": "",
   "autoUpdate": {
+    "updateMode": "on-demand",
+    "checkIntervalMinutes": 10,
+    "onFailedStart": "stay",
     "enabled": true,
     "intervalHours": 6,
     "checkAfterStartSecs": 30,

@@ -3,10 +3,13 @@
 
 mod accounts;
 mod config;
-mod monitor;
+mod diag;
 mod http;
+mod monitor;
+mod prereq;
 mod runtime;
 mod schedule;
+mod setup;
 mod update;
 
 use std::path::Path;
@@ -36,6 +39,7 @@ mod service;
 pub use config::{load_config, AccountServerConfig, AgentConfig, AutoUpdateConfig};
 pub use http::{serve, serve_listener};
 pub use runtime::{Agent, Fail};
+pub use setup::setup_fnf;
 pub use update::SelfUpdateOutcome;
 
 #[cfg(windows)]

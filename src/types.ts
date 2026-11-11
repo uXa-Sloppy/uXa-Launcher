@@ -113,6 +113,30 @@ export interface AgentStatus {
   lastUpdateResult?: string;
   stagedVersion?: string;
   nextRestartAt?: string;
+  updateMode?: string;
+  previousVersion?: string;
+  checkIntervalMinutes?: number;
+  failedStart?: FailedStart | null;
+  agentHealth?: AgentHealth | null;
+}
+
+export interface FailedStart {
+  tag: string;
+  at: string;
+  exitCode?: number | null;
+  exitText?: string;
+  logTail?: string;
+  artifactDir?: string;
+}
+
+export interface AgentHealth {
+  ok: boolean;
+  at: string;
+  agentVersion: string;
+  updateMode: string;
+  listening: boolean;
+  pendingInstallCancelled?: boolean;
+  cancelledStagedVersion?: string;
 }
 
 export interface AgentRelease {

@@ -54,6 +54,56 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
         .unwrap_or("")
 }
 
+fn query_string(uri: &Uri, key: &str) -> String {
+    let Some(query) = uri.query() else {
+        return String::new();
+    };
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next() == Some(key) {
+            return percent_decode(parts.next().unwrap_or(""));
+        }
+    }
+    String::new()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn public_config(value: &serde_json::Value) -> serde_json::Value {
+    let mut copy = value.clone();
+    if let Some(obj) = copy.as_object_mut() {
+        obj.retain(|key, _| {
+            !matches!(
+                key.to_ascii_lowercase().as_str(),
+                "secret" | "token" | "password" | "githubtoken" | "github_token" | "agentsecret"
+            )
+        });
+    }
+    copy
+}
+
 fn query_u64(uri: &Uri, key: &str) -> u64 {
     let Some(query) = uri.query() else {
         return 0;
@@ -105,7 +155,11 @@ struct RateWindow {
 fn rate_window() -> &'static std::sync::Mutex<RateWindow> {
     static W: std::sync::OnceLock<std::sync::Mutex<RateWindow>> = std::sync::OnceLock::new();
     W.get_or_init(|| {
-        std::sync::Mutex::new(RateWindow { per_ip: Default::default(), signups: Vec::new(), health: Vec::new() })
+        std::sync::Mutex::new(RateWindow {
+            per_ip: Default::default(),
+            signups: Vec::new(),
+            health: Vec::new(),
+        })
     })
 }
 
@@ -113,7 +167,9 @@ fn rate_window() -> &'static std::sync::Mutex<RateWindow> {
 fn rate_allow(ip: &str, signup: bool) -> bool {
     let now = std::time::Instant::now();
     let minute = std::time::Duration::from_secs(60);
-    let Ok(mut w) = rate_window().lock() else { return false };
+    let Ok(mut w) = rate_window().lock() else {
+        return false;
+    };
     let fresh = |v: &mut Vec<std::time::Instant>| v.retain(|t| now.duration_since(*t) < minute);
     if !signup {
         fresh(&mut w.health);
@@ -125,7 +181,8 @@ fn rate_allow(ip: &str, signup: bool) -> bool {
     }
     fresh(&mut w.signups);
     if w.per_ip.len() > 4096 {
-        w.per_ip.retain(|_, v| v.last().map_or(false, |t| now.duration_since(*t) < minute));
+        w.per_ip
+            .retain(|_, v| v.last().map_or(false, |t| now.duration_since(*t) < minute));
     }
     let mine = w.per_ip.entry(ip.to_string()).or_default();
     mine.retain(|t| now.duration_since(*t) < minute);
@@ -147,7 +204,11 @@ fn client_ip(headers: &HeaderMap) -> String {
     if !cf.is_empty() {
         return cf.chars().take(64).collect();
     }
-    let xff = header(headers, "x-forwarded-for").split(',').next().unwrap_or("").trim();
+    let xff = header(headers, "x-forwarded-for")
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim();
     if !xff.is_empty() {
         return xff.chars().take(64).collect();
     }
@@ -155,34 +216,64 @@ fn client_ip(headers: &HeaderMap) -> String {
 }
 
 fn account_json(status: StatusCode, error: &str, message: &str) -> Response {
-    (status, Json(serde_json::json!({ "ok": false, "error": error, "message": message }))).into_response()
+    (
+        status,
+        Json(serde_json::json!({ "ok": false, "error": error, "message": message })),
+    )
+        .into_response()
 }
 
 /// Public, unsigned: forwards invite sign-ups to the local account server. Bodies (invite keys,
 /// passwords) are passed through untouched and never logged.
-async fn account_proxy(agent: &Agent, method: &Method, target: &'static str, headers: &HeaderMap, body: Bytes) -> Response {
+async fn account_proxy(
+    agent: &Agent,
+    method: &Method,
+    target: &'static str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
     let signup = target == "/v1/signup";
-    let allowed = if signup { *method == Method::POST } else { *method == Method::GET };
+    let allowed = if signup {
+        *method == Method::POST
+    } else {
+        *method == Method::GET
+    };
     if !allowed {
         return account_json(StatusCode::METHOD_NOT_ALLOWED, "not_found", "Not found.");
     }
     if body.len() > ACCOUNT_MAX_BODY {
-        return account_json(StatusCode::PAYLOAD_TOO_LARGE, "bad_request", "Request too large.");
+        return account_json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "bad_request",
+            "Request too large.",
+        );
     }
     let cfg = &agent.config.account_server;
     if !cfg.enabled {
-        return account_json(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Sign-ups are not enabled on this server.");
+        return account_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "Sign-ups are not enabled on this server.",
+        );
     }
     let ip = client_ip(headers);
     if !rate_allow(&ip, signup) {
         if signup {
             agent.log("account proxy: sign-up rate limit hit".to_string());
         }
-        return account_json(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many sign-up attempts. Try again in a minute.");
+        return account_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Too many sign-up attempts. Try again in a minute.",
+        );
     }
     let url = format!("http://127.0.0.1:{}{}", cfg.port, target);
     let request = if signup {
-        agent.client.post(&url).header("Content-Type", "application/json").body(body.to_vec())
+        agent
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body.to_vec())
     } else {
         agent.client.get(&url)
     };
@@ -193,18 +284,37 @@ async fn account_proxy(agent: &Agent, method: &Method, target: &'static str, hea
             if signup {
                 agent.log("account proxy: account server did not answer".to_string());
             }
-            return account_json(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Account server is offline. Try again shortly.");
+            return account_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "Account server is offline. Try again shortly.",
+            );
         }
     };
-    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let bytes = match response.bytes().await {
         Ok(b) if b.len() <= 64 * 1024 => b,
-        _ => return account_json(StatusCode::BAD_GATEWAY, "unavailable", "Account server reply was unreadable."),
+        _ => {
+            return account_json(
+                StatusCode::BAD_GATEWAY,
+                "unavailable",
+                "Account server reply was unreadable.",
+            )
+        }
     };
     if signup {
-        agent.log(format!("account proxy: sign-up -> HTTP {}", status.as_u16()));
+        agent.log(format!(
+            "account proxy: sign-up -> HTTP {}",
+            status.as_u16()
+        ));
     }
-    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], bytes).into_response()
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn dispatch(
@@ -238,6 +348,7 @@ async fn dispatch(
             "Admin key was rejected by the server agent.",
         );
     }
+    agent.log(format!("signed {method} {path}"));
 
     let result = match (method.as_str(), path) {
         ("GET", "/v1/status") => Ok(Reply::Status(agent.status().await)),
@@ -319,6 +430,110 @@ async fn dispatch(
                 status,
             })
         }),
+        ("POST", "/v1/check") => match agent.report_available().await {
+            Ok(status) => return axum::Json(status).into_response(),
+            Err(err) => Err(crate::runtime::Fail { http: 502, message: err }),
+        },
+        ("POST", "/v1/rollback") => agent.rollback_previous().await.map(|status| {
+            Reply::Action(AgentAction {
+                ok: true,
+                message: format!("Rolled back to {}.", status.version),
+                status,
+            })
+        }),
+        ("PATCH", "/v1/config") => {
+            let patch = if body.is_empty() {
+                serde_json::json!({})
+            } else {
+                match serde_json::from_slice::<serde_json::Value>(&body) {
+                    Ok(value) => value,
+                    Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+                }
+            };
+            match agent.patch_config(&patch) {
+                Ok(value) => {
+                    return axum::Json(serde_json::json!({
+                        "ok": true,
+                        "message": "Config updated.",
+                        "config": public_config(&value),
+                    }))
+                    .into_response()
+                }
+                Err(err) => Err(err),
+            }
+        }
+        ("GET", "/v1/diag/logs") => {
+            let source = match crate::diag::parse_log_source(&query_string(&uri, "source")) {
+                Ok(source) => source,
+                Err(err) => return json_error(StatusCode::BAD_REQUEST, &err),
+            };
+            let failed = query_string(&uri, "name");
+            let failed = if failed.is_empty() { None } else { Some(failed) };
+            let lines = query_u64(&uri, "lines");
+            let lines = if lines == 0 { 80 } else { lines as usize };
+            match crate::diag::read_scoped_log(
+                &agent.config.install_dir,
+                &agent.config.work_dir,
+                &agent.config.log_dir,
+                source,
+                failed.as_deref(),
+                lines,
+            ) {
+                Ok(value) => return axum::Json(value).into_response(),
+                Err(err) => Err(crate::runtime::Fail { http: 404, message: err }),
+            }
+        }
+        ("GET", "/v1/diag/crashes") => {
+            let hits = crate::diag::list_crashes(&agent.config.install_dir, &agent.config.work_dir);
+            let crashes: Vec<_> = hits
+                .into_iter()
+                .map(|hit| {
+                    serde_json::json!({
+                        "id": hit.id,
+                        "name": hit.name,
+                        "bytes": hit.bytes,
+                        "tooLarge": hit.too_large,
+                    })
+                })
+                .collect();
+            return axum::Json(serde_json::json!({ "crashes": crashes, "maxBytes": crate::diag::MAX_DUMP_BYTES })).into_response();
+        }
+        ("GET", "/v1/diag/crashes/download") => {
+            let id = query_string(&uri, "id");
+            let offset = query_u64(&uri, "offset");
+            let limit = query_u64(&uri, "limit");
+            let limit = if limit == 0 { crate::diag::MAX_CHUNK_BYTES } else { limit };
+            let path = match crate::diag::crash_by_id(&agent.config.install_dir, &agent.config.work_dir, &id) {
+                Ok(path) => path,
+                Err(err) => return json_error(StatusCode::NOT_FOUND, &err),
+            };
+            match crate::diag::read_dump_chunk(&path, offset, limit) {
+                Ok((bytes, total)) => {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+                        .header("x-uxa-total", total.to_string())
+                        .header("x-uxa-offset", offset.to_string())
+                        .body(axum::body::Body::from(bytes))
+                        .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "could not send the dump"))
+                }
+                Err(err) => return json_error(StatusCode::BAD_REQUEST, &err),
+            }
+        }
+        ("GET", "/v1/diag/events") => {
+            let roots = vec![
+                agent.config.install_dir.clone(),
+                std::path::PathBuf::from(r"C:\FNF"),
+            ];
+            return axum::Json(crate::diag::application_events(&agent.config.executable, &roots)).into_response();
+        }
+        ("GET", "/v1/diag/prereqs") => {
+            return axum::Json(crate::prereq::prereq_report(
+                &agent.config.install_dir,
+                &agent.config.work_dir,
+            ))
+            .into_response();
+        }
         ("POST", "/v1/wipe") => {
             let ok = serde_json::from_slice::<WipeBody>(&body)
                 .map(|b| b.confirm == "WIPE")
@@ -342,9 +557,10 @@ async fn dispatch(
             })
         }),
         (
-            "GET" | "POST",
+            "GET" | "POST" | "PATCH",
             "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe" | "/v1/serverlog"
-            | "/v1/monitor" | "/v1/accounts/status" | "/v1/accounts/restart" | "/v1/accounts/deploy" | "/v1/accounts/invite" | "/v1/agent/update" | "/v1/backups/restore",
+            | "/v1/monitor" | "/v1/accounts/status" | "/v1/accounts/restart" | "/v1/accounts/deploy" | "/v1/accounts/invite" | "/v1/agent/update" | "/v1/backups/restore"
+            | "/v1/check" | "/v1/rollback" | "/v1/config" | "/v1/diag/logs" | "/v1/diag/crashes" | "/v1/diag/crashes/download" | "/v1/diag/events" | "/v1/diag/prereqs",
         ) => {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.");
         }
@@ -388,9 +604,18 @@ mod proxy_tests {
 
     #[test]
     fn proxy_paths() {
-        assert_eq!(account_proxy_target("/fnf-accounts/v1/signup"), Some("/v1/signup"));
-        assert_eq!(account_proxy_target("/fnf-accounts:80/v1/signup"), Some("/v1/signup"));
-        assert_eq!(account_proxy_target("/fnf-accounts:8788/v1/health"), Some("/v1/health"));
+        assert_eq!(
+            account_proxy_target("/fnf-accounts/v1/signup"),
+            Some("/v1/signup")
+        );
+        assert_eq!(
+            account_proxy_target("/fnf-accounts:80/v1/signup"),
+            Some("/v1/signup")
+        );
+        assert_eq!(
+            account_proxy_target("/fnf-accounts:8788/v1/health"),
+            Some("/v1/health")
+        );
         assert_eq!(account_proxy_target("/fnf-accounts/v1/../v1/status"), None);
         assert_eq!(account_proxy_target("/fnf-accounts:/v1/signup"), None);
         assert_eq!(account_proxy_target("/fnf-accounts:x/v1/signup"), None);
@@ -410,6 +635,7 @@ mod proxy_tests {
 }
 
 pub async fn serve_listener(agent: Arc<Agent>, listener: TcpListener) -> Result<(), String> {
+    agent.publish_health(true);
     let app = router(agent);
     axum::serve(listener, app)
         .await

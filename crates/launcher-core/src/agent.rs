@@ -32,8 +32,56 @@ pub struct AgentStatus {
     #[serde(default)]
     pub staged_version: String,
     /// Next time the game server may be restarted, RFC3339 with the zone offset.
+    /// Empty in 0.3.12: nothing restarts on a clock.
     #[serde(default)]
     pub next_restart_at: String,
+    /// `on-demand` from 0.3.12. Game installs happen only on a signed command.
+    #[serde(default)]
+    pub update_mode: String,
+    /// Tag of the build kept at `{install}.previous`, if one is on disk.
+    #[serde(default)]
+    pub previous_version: String,
+    /// Set when a new build failed to stay up. The agent does not roll it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_start: Option<FailedStart>,
+    /// Written after this process binds its listener, including after a self-update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_health: Option<AgentHealth>,
+    /// Minutes between report-only GitHub polls. Always 5–15.
+    #[serde(default)]
+    pub check_interval_minutes: u64,
+}
+
+/// Evidence from a game start that exited before it was healthy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedStart {
+    pub tag: String,
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub exit_text: String,
+    #[serde(default)]
+    pub log_tail: String,
+    /// Relative to the agent work directory. Not a path the caller can choose.
+    #[serde(default)]
+    pub artifact_dir: String,
+}
+
+/// Post-start report for the agent process itself (not the game server).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHealth {
+    pub ok: bool,
+    pub at: String,
+    pub agent_version: String,
+    pub update_mode: String,
+    pub listening: bool,
+    #[serde(default)]
+    pub pending_install_cancelled: bool,
+    #[serde(default)]
+    pub cancelled_staged_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
