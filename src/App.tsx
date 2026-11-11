@@ -830,8 +830,12 @@ function AdminDialog({
                 <span>Agent {status?.agentVersion || "—"}</span>
                 <span>Last check {status?.lastCheckAt || "—"}{status?.lastCheckResult ? ` · ${status.lastCheckResult}` : ""}</span>
                 <span>Last update {status?.lastUpdateAt || "—"}{status?.lastUpdateResult ? ` · ${status.lastUpdateResult}` : ""}</span>
+                <span>Mode {status?.updateMode || "—"}</span>
                 <span>Staged {status?.stagedVersion || "—"}</span>
-                <span>Next restart {status?.nextRestartAt || "—"}</span>
+                <span>Previous {status?.previousVersion || "—"}</span>
+                {status?.failedStart ? (
+                  <span>Failed start {status.failedStart.tag} ({status.failedStart.exitText || "exit"})</span>
+                ) : null}
               </div>
               <div className="row-actions">
                 <button type="button" className="btn primary" disabled={busy || !tag} onClick={() => setConfirm("deploy")}>

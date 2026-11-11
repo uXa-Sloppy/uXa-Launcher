@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use uxa_server_agent::{Agent, AccountServerConfig, AgentConfig, AutoUpdateConfig, SelfUpdateOutcome};
+use uxa_server_agent::{
+    AccountServerConfig, Agent, AgentConfig, AutoUpdateConfig, SelfUpdateOutcome,
+};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -169,6 +171,7 @@ fn test_config(root: &Path, api: &str) -> AgentConfig {
         secret: "test-secret-not-for-production".into(),
         auto_update: auto,
         account_server: AccountServerConfig::disabled(),
+        source_path: Path::new("").into(),
     };
     config.finish_paths().unwrap();
     config
@@ -307,11 +310,29 @@ async fn update_does_not_delete_or_overwrite_saved() {
     let failed = agent
         .apply_maintenance()
         .await
-        .expect_err("broken build rolls back");
-    assert!(failed.contains("Previous build restored"), "{failed}");
+        .expect_err("broken build stays installed");
+    assert!(failed.contains("Staying on v0.9.8"), "{failed}");
+    assert!(!failed.contains("Previous build restored"), "{failed}");
     let status = agent.status().await;
-    assert_eq!(status.version, "v0.9.7.2-build18g");
-    assert!(status.online, "previous build should be running");
+    assert_eq!(status.version, "v0.9.8");
+    assert!(!status.online, "failed start does not roll back");
+    assert_eq!(status.phase, "failed-start");
+    assert!(status.failed_start.is_some());
+    assert_eq!(fs::read(&world).unwrap(), b"CORRUPT");
+    assert!(
+        temp.path()
+            .join("FridayNightFightsServer.previous")
+            .is_dir(),
+        "previous build stays on disk"
+    );
+    assert!(walk_contains(
+        &temp.path().join("FridayNightFightsServer.previous"),
+        "world.sav",
+        b"WORLD"
+    ));
+    let rolled = agent.rollback_previous().await.expect("manual rollback");
+    assert_eq!(rolled.version, "v0.9.7.2-build18g");
+    assert!(rolled.online);
     assert_eq!(fs::read(&world).unwrap(), b"WORLD");
     assert_eq!(fs::read(&account).unwrap(), b"ACCOUNT");
     assert!(!walk_contains(&install, "world.sav", b"CORRUPT"));

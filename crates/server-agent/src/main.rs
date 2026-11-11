@@ -10,6 +10,18 @@ fn foreground() -> Result<(), String> {
 fn main() {
     // axum-server pulls in aws-lc-rs and reqwest pulls in ring, so rustls cannot pick a provider by itself.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    if std::env::args().any(|arg| arg == "--setup-fnf") {
+        match uxa_server_agent::setup_fnf() {
+            Ok(report) => {
+                println!("{report}");
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+    }
     let service = std::env::args().any(|arg| arg == "--service");
     if service {
         #[cfg(windows)]
@@ -22,7 +34,9 @@ fn main() {
         }
         #[cfg(not(windows))]
         {
-            eprintln!("--service is only supported on Windows. Run uxa-server-agent in the foreground.");
+            eprintln!(
+                "--service is only supported on Windows. Run uxa-server-agent in the foreground."
+            );
             std::process::exit(1);
         }
     }

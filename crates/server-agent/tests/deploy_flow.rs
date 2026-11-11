@@ -11,7 +11,7 @@ use std::time::Duration;
 use launcher_core::{
     agent_exchange, sign_request, AgentAction, AgentLogLine, AgentReleaseSummary, AgentStatus,
 };
-use uxa_server_agent::{serve_listener, Agent, AccountServerConfig, AgentConfig, AutoUpdateConfig};
+use uxa_server_agent::{serve_listener, AccountServerConfig, Agent, AgentConfig, AutoUpdateConfig};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -160,6 +160,7 @@ fn test_config(root: &Path, api: &str, listen: &str) -> AgentConfig {
         secret: "test-secret-not-for-production".into(),
         auto_update: AutoUpdateConfig::disabled(),
         account_server: AccountServerConfig::disabled(),
+        source_path: Path::new("").into(),
     };
     config.finish_paths().unwrap();
     config
@@ -256,9 +257,16 @@ async fn deploy_preserves_saves_and_rolls_back() {
 
     // Since 0.3.8 an empty tag means the highest version, which here is the broken
     // pre-release. Name the good build explicitly.
-    let deployed = call(&http, &base, &secret, "POST", "/v1/deploy", br#"{"tag":"v1.2.0"}"#)
-        .await
-        .unwrap();
+    let deployed = call(
+        &http,
+        &base,
+        &secret,
+        "POST",
+        "/v1/deploy",
+        br#"{"tag":"v1.2.0"}"#,
+    )
+    .await
+    .unwrap();
     let action: AgentAction = serde_json::from_str(&deployed).unwrap();
     assert!(action.ok);
     assert_eq!(action.status.version, "v1.2.0");
@@ -294,7 +302,9 @@ async fn deploy_preserves_saves_and_rolls_back() {
     )
     .await;
     let err = broken.expect_err("broken build must fail the deploy");
-    assert!(err.contains("Previous build restored"), "{err}");
+    assert!(err.contains("Staying on v9.9.9-broken"), "{err}");
+    assert!(err.contains("/v1/rollback"), "{err}");
+    assert!(!err.contains("Previous build restored"), "{err}");
 
     let status: AgentStatus = serde_json::from_str(
         &call(&http, &base, &secret, "GET", "/v1/status", b"")
@@ -302,11 +312,23 @@ async fn deploy_preserves_saves_and_rolls_back() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(status.version, "v1.2.0");
-    assert!(
-        status.online,
-        "previous build should be running after rollback"
-    );
+    assert_eq!(status.version, "v9.9.9-broken");
+    assert!(!status.online, "failed start stays down on the new build");
+    assert_eq!(status.phase, "failed-start");
+    assert_eq!(status.update_mode, "on-demand");
+    let failed = status.failed_start.expect("failedStart is reported");
+    assert_eq!(failed.tag, "v9.9.9-broken");
+    assert!(failed.exit_code.is_some(), "{failed:?}");
+    assert!(temp
+        .path()
+        .join("work")
+        .join(&failed.artifact_dir)
+        .join("exit.txt")
+        .is_file());
+    assert!(temp
+        .path()
+        .join("FridayNightFightsServer.previous")
+        .is_dir());
     assert_eq!(
         fs::read(install.join("Saved/Worlds/island.sav")).unwrap(),
         b"WORLD"
@@ -326,6 +348,18 @@ async fn deploy_preserves_saves_and_rolls_back() {
     assert!(events.contains("say uXa:"), "{events}");
     assert!(events.contains("quit"), "{events}");
     assert!(events.contains("bad-start"), "{events}");
+
+    let rolled = call(&http, &base, &secret, "POST", "/v1/rollback", b"")
+        .await
+        .unwrap();
+    let rolled: AgentAction = serde_json::from_str(&rolled).unwrap();
+    assert!(rolled.ok, "{rolled:?}");
+    assert_eq!(rolled.status.version, "v1.2.0");
+    assert!(
+        rolled.status.online,
+        "manual rollback starts the previous build"
+    );
+    assert!(rolled.status.failed_start.is_none());
 
     let restarted = call(&http, &base, &secret, "POST", "/v1/restart", b"")
         .await
@@ -360,7 +394,9 @@ async fn deploy_preserves_saves_and_rolls_back() {
         .join("\n");
     assert!(text.contains("backed up Saved"), "{text}");
     assert!(text.contains("broadcast warning"), "{text}");
-    assert!(text.contains("rolling back"), "{text}");
+    assert!(text.contains("failed start"), "{text}");
+    assert!(text.contains("manual rollback"), "{text}");
+    assert!(!text.contains("rolling back to previous"), "{text}");
     assert!(text.contains("rejected"), "{text}");
 }
 
@@ -406,6 +442,31 @@ fn missing_auto_update_uses_a_six_hour_check_and_three_am_eastern() {
     assert_eq!(config.auto_update.restart_window_minutes, 10);
     assert_eq!(config.auto_update.keep_backups, 7);
     assert_eq!(config.auto_update.grace_seconds, 180);
+    assert_eq!(config.auto_update.update_mode, "on-demand");
+    assert_eq!(config.auto_update.on_failed_start, "stay");
+    assert_eq!(config.auto_update.check_interval_minutes, 10);
+    std::env::remove_var("UXA_AGENT_CONFIG");
+    std::env::remove_var("UXA_AGENT_SECRET");
+}
+
+#[test]
+fn a_0_3_11_auto_update_block_comes_up_on_demand() {
+    let _lock = env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("agent.json");
+    fs::write(
+        &path,
+        r#"{"installDir":"C:\\FNF\\Server","listen":"0.0.0.0:8788","autoUpdate":{"enabled":true,"serverEnabled":true,"dailyRestart":true,"restartTime":"03:00","restartTimeZone":"America/New_York","updateMode":"nightly","onFailedStart":"rollback"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("UXA_AGENT_CONFIG", &path);
+    std::env::set_var("UXA_AGENT_SECRET", "from-env");
+    let config = uxa_server_agent::load_config().expect("old config must still boot");
+    assert_eq!(config.auto_update.update_mode, "on-demand");
+    assert_eq!(config.auto_update.on_failed_start, "stay");
+    assert_eq!(config.auto_update.check_interval_minutes, 10);
+    assert!(config.auto_update.enabled);
+    assert!(config.auto_update.daily_restart);
     std::env::remove_var("UXA_AGENT_CONFIG");
     std::env::remove_var("UXA_AGENT_SECRET");
 }

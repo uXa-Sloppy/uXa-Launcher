@@ -1,4 +1,5 @@
-//! Download, swap, start, and roll back the dedicated server.
+//! Download, swap, and start the dedicated server. A failed start stays on the
+//! new build. The previous build remains on disk for a signed rollback.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -9,17 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use launcher_core::{
-    copy_preserved, discard_previous, download_url, download_with_resume, extract_zip,
-    find_release_by_tag, http_client, list_matching_releases, previous_install_dir,
-    resolve_preserved, restore_previous, swap_keeping_previous, verify_download, AgentLogLine,
-    AgentReleaseSummary, AgentStatus, DownloadRequest, ReleaseInfo, ReleaseSource,
+    copy_preserved, download_url, download_with_resume, extract_zip, find_release_by_tag,
+    http_client, list_matching_releases, previous_install_dir, resolve_preserved, restore_previous,
+    swap_keeping_previous, verify_download, AgentHealth, AgentLogLine, AgentReleaseSummary,
+    AgentStatus, DownloadRequest, FailedStart, ReleaseInfo, ReleaseSource,
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
-use crate::config::AgentConfig;
-use crate::schedule::{format_local, next_restart, parse_clock, parse_zone};
+use crate::config::{AgentConfig, LivePolicy};
 use crate::update::{load_state, UpdateState};
 
 const VERSION_FILE: &str = ".uxa-server-version";
@@ -68,6 +68,12 @@ pub struct Agent {
     pub(crate) expect_running: AtomicBool,
     pub(crate) crash_restarts: Mutex<Vec<Instant>>,
     pub(crate) booted_at: Instant,
+    last_exit: Mutex<Option<i32>>,
+    server_log_mark: AtomicU64,
+    failed_start: Mutex<Option<FailedStart>>,
+    agent_health: Mutex<Option<AgentHealth>>,
+    policy: Mutex<LivePolicy>,
+    prereq_retried: Mutex<String>,
 }
 
 #[derive(Debug)]
@@ -92,7 +98,19 @@ impl Agent {
         let version = read_version(&config.install_dir);
         let adopted = load_running(&config);
         let online = adopted.is_some();
-        Ok(Arc::new(Self {
+        let failed = if online {
+            let _ = fs::remove_file(config.work_dir.join("failed-start.json"));
+            None
+        } else {
+            load_persisted_failure(&config.work_dir)
+        };
+        let phase = if failed.is_some() {
+            "failed-start"
+        } else {
+            "idle"
+        };
+        let policy = LivePolicy::from_config(&config);
+        let agent = Arc::new(Self {
             updates: Mutex::new(load_state(&config.work_dir)),
             scheduler_started: AtomicBool::new(false),
             config,
@@ -101,7 +119,7 @@ impl Agent {
             logs: Mutex::new(std::collections::VecDeque::new()),
             next_log: AtomicU64::new(1),
             busy: AtomicBool::new(false),
-            phase: Mutex::new("idle".into()),
+            phase: Mutex::new(phase.into()),
             started_at: Mutex::new(if online { Some(Instant::now()) } else { None }),
             version: Mutex::new(version),
             online: AtomicBool::new(online),
@@ -109,11 +127,20 @@ impl Agent {
             expect_running: AtomicBool::new(online),
             crash_restarts: Mutex::new(Vec::new()),
             booted_at: Instant::now(),
-        }))
+            last_exit: Mutex::new(None),
+            server_log_mark: AtomicU64::new(0),
+            failed_start: Mutex::new(failed),
+            agent_health: Mutex::new(None),
+            policy: Mutex::new(policy),
+            prereq_retried: Mutex::new(String::new()),
+        });
+        // A 0.3.11 staged release must not install at 03:00 after this process starts.
+        agent.cancel_pending_scheduled_install();
+        Ok(agent)
     }
 
     pub fn log(&self, message: impl Into<String>) {
-        let message = message.into();
+        let message = crate::diag::redact(&message.into());
         tracing::info!("{message}");
         let id = self.next_log.fetch_add(1, Ordering::Relaxed);
         let line = AgentLogLine {
@@ -146,6 +173,92 @@ impl Agent {
         }
     }
 
+    pub(crate) fn phase_name(&self) -> String {
+        self.phase
+            .lock()
+            .map(|phase| phase.clone())
+            .unwrap_or_else(|_| "idle".into())
+    }
+
+    fn keep_failed_phase(&self) {
+        if self.phase_name() != "failed-start" {
+            self.set_phase("idle");
+        }
+    }
+
+    pub(crate) fn policy_snapshot(&self) -> LivePolicy {
+        self.policy
+            .lock()
+            .map(|policy| policy.clone())
+            .unwrap_or_else(|err| err.into_inner().clone())
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        self.last_exit.lock().ok().and_then(|slot| *slot)
+    }
+
+    pub fn publish_health(&self, listening: bool) {
+        let state = self.updates.lock().ok();
+        let health = AgentHealth {
+            ok: listening,
+            at: chrono::Utc::now().to_rfc3339(),
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            update_mode: self.policy_snapshot().update_mode,
+            listening,
+            pending_install_cancelled: state
+                .as_ref()
+                .is_some_and(|state| state.pending_install_cancelled),
+            cancelled_staged_version: state
+                .as_ref()
+                .map(|state| state.cancelled_staged_version.clone())
+                .unwrap_or_default(),
+        };
+        if let Ok(text) = serde_json::to_string(&health) {
+            let _ = fs::create_dir_all(&self.config.work_dir);
+            let _ = fs::write(self.config.work_dir.join("agent-health.json"), text);
+        }
+        if let Ok(mut slot) = self.agent_health.lock() {
+            *slot = Some(health);
+        }
+        self.log(format!(
+            "agent health ok={listening} version={}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+
+    pub fn patch_config(&self, patch: &serde_json::Value) -> Result<serde_json::Value, Fail> {
+        let path = &self.config.source_path;
+        if path.as_os_str().is_empty() || !path.is_file() {
+            return Err(Fail::msg(500, "agent.json path is not available"));
+        }
+        let text = fs::read_to_string(path)
+            .map_err(|err| Fail::msg(500, format!("could not read agent config: {err}")))?;
+        let mut value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|err| Fail::msg(500, format!("agent config is not valid JSON: {err}")))?;
+        let policy = crate::config::apply_config_patch(&mut value, patch)
+            .map_err(|err| Fail::msg(400, err))?;
+        let pretty =
+            serde_json::to_string_pretty(&value).map_err(|err| Fail::msg(500, err.to_string()))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, format!("{pretty}\n"))
+            .map_err(|err| Fail::msg(500, format!("could not write agent config: {err}")))?;
+        fs::rename(&tmp, path)
+            .map_err(|err| Fail::msg(500, format!("could not replace agent config: {err}")))?;
+        if let Ok(mut slot) = self.policy.lock() {
+            *slot = policy.clone();
+        }
+        self.log(format!(
+            "config patched updateMode={} onFailedStart={} repo={}/{} checkIntervalMinutes={}",
+            policy.update_mode,
+            policy.on_failed_start,
+            policy.owner,
+            policy.repo,
+            policy.check_interval_minutes
+        ));
+        self.record_event("config", "signed config patch applied");
+        Ok(value)
+    }
+
     pub async fn status(&self) -> AgentStatus {
         self.refresh_liveness().await;
         let online = self.online.load(Ordering::Acquire);
@@ -168,6 +281,7 @@ impl Agent {
             phase = "running".into();
         }
         let update = self.updates.lock().ok();
+        let policy = self.policy_snapshot();
         AgentStatus {
             version,
             online,
@@ -200,21 +314,13 @@ impl Agent {
                 .as_ref()
                 .map(|s| s.staged_version.clone())
                 .unwrap_or_default(),
-            next_restart_at: self.next_restart_label(),
+            next_restart_at: String::new(),
+            update_mode: policy.update_mode,
+            previous_version: previous_version(&self.config.install_dir),
+            failed_start: self.failed_start.lock().ok().and_then(|slot| slot.clone()),
+            agent_health: self.agent_health.lock().ok().and_then(|slot| slot.clone()),
+            check_interval_minutes: policy.check_interval_minutes,
         }
-    }
-
-    fn next_restart_label(&self) -> String {
-        if !self.config.auto_update.enabled {
-            return String::new();
-        }
-        let Some(time) = parse_clock(&self.config.auto_update.restart_time) else {
-            return String::new();
-        };
-        let Ok(tz) = parse_zone(&self.config.auto_update.restart_time_zone) else {
-            return String::new();
-        };
-        format_local(next_restart(chrono::Utc::now(), time, tz), tz)
     }
 
     pub async fn releases(&self) -> Result<Vec<AgentReleaseSummary>, Fail> {
@@ -247,7 +353,10 @@ impl Agent {
         self.set_phase("deploying");
         self.log(format!("deploy started tag={label}"));
         let result = self.deploy_inner(tag.trim()).await;
-        self.set_phase("idle");
+        match &result {
+            Ok(()) => self.set_phase("idle"),
+            Err(_) => self.keep_failed_phase(),
+        }
         match result {
             Ok(()) => {
                 let status = self.status().await;
@@ -255,7 +364,10 @@ impl Agent {
                     "deploy finished version={} online={}",
                     status.version, status.online
                 ));
-                self.record_event("deploy", format!("deployed {} online={}", status.version, status.online));
+                self.record_event(
+                    "deploy",
+                    format!("deployed {} online={}", status.version, status.online),
+                );
                 Ok(status)
             }
             Err(err) => {
@@ -276,16 +388,11 @@ impl Agent {
             return Err(err);
         }
         self.set_phase("starting");
-        if let Err(err) = self.start_installed().await {
-            self.set_phase("idle");
+        let tag = read_version(&self.config.install_dir);
+        if let Err(err) = self.boot_installed(&tag, false).await {
+            self.keep_failed_phase();
             self.log(format!("restart failed: {}", err.message));
             return Err(err);
-        }
-        if let Err(err) = self.health_check().await {
-            self.set_phase("idle");
-            let message = format!("Restart failed health check: {err}");
-            self.log(&message);
-            return Err(Fail::msg(500, message));
         }
         self.set_phase("idle");
         let status = self.status().await;
@@ -381,18 +488,21 @@ impl Agent {
             Ok(Some(path)) => self.log(format!("wipe: backed up Saved to {}", path.display())),
             Ok(None) => self.log("wipe: no Saved folder to back up"),
             Err(err) => {
-                self.log(format!("wipe: backup failed ({err}); nothing was deleted, restarting"));
+                self.log(format!(
+                    "wipe: backup failed ({err}); nothing was deleted, restarting"
+                ));
                 let _ = self.start_installed().await;
                 return Err(Fail::msg(
                     500,
-                    format!("Save backup failed: {err}. Nothing was wiped; the server was restarted."),
+                    format!(
+                        "Save backup failed: {err}. Nothing was wiped; the server was restarted."
+                    ),
                 ));
             }
         }
         self.set_phase("wiping");
-        let removed = wipe_save_games(&self.config.install_dir).map_err(|err| {
-            Fail::msg(500, format!("wipe: could not clear SaveGames: {err}"))
-        });
+        let removed = wipe_save_games(&self.config.install_dir)
+            .map_err(|err| Fail::msg(500, format!("wipe: could not clear SaveGames: {err}")));
         match removed {
             Ok(list) if list.is_empty() => self.log("wipe: no SaveGames folder found"),
             Ok(list) => {
@@ -409,9 +519,12 @@ impl Agent {
         self.set_phase("starting");
         self.start_installed().await?;
         self.log("wipe: server started");
-        self.health_check()
-            .await
-            .map_err(|err| Fail::msg(500, format!("Wiped, but the restart failed its health check: {err}")))?;
+        self.health_check().await.map_err(|err| {
+            Fail::msg(
+                500,
+                format!("Wiped, but the restart failed its health check: {err}"),
+            )
+        })?;
         Ok(())
     }
 
@@ -429,10 +542,11 @@ impl Agent {
     }
 
     pub(crate) fn release_source(&self) -> ReleaseSource {
+        let policy = self.policy_snapshot();
         ReleaseSource {
             api_base: self.config.api_base.clone(),
-            owner: self.config.owner.clone(),
-            repo: self.config.repo.clone(),
+            owner: policy.owner,
+            repo: policy.repo,
             asset_contains: self.config.asset_contains.clone(),
             asset_pattern: self.config.asset_pattern.clone(),
             include_prereleases: self.config.include_prereleases,
@@ -478,8 +592,16 @@ impl Agent {
         ));
         if release.asset.split.is_some() {
             let parts_dir = downloads.join(format!("{}.parts", file_name(&release.asset.name)));
-            let parts = release.asset.split.as_ref().map(|s| s.parts.len()).unwrap_or(0);
-            self.log(format!("{} is split into {parts} parts; downloading each with resume", release.asset.name));
+            let parts = release
+                .asset
+                .split
+                .as_ref()
+                .map(|s| s.parts.len())
+                .unwrap_or(0);
+            self.log(format!(
+                "{} is split into {parts} parts; downloading each with resume",
+                release.asset.name
+            ));
             let manifest = launcher_core::download_split(
                 launcher_core::SplitDownload {
                     client: &self.client,
@@ -534,6 +656,9 @@ impl Agent {
             fs::remove_dir_all(dest).map_err(|err| err.to_string())?;
         }
         fs::rename(&partial, dest).map_err(|err| err.to_string())?;
+        if let Err(err) = crate::prereq::record_hashes(&self.config.work_dir, &release.tag, dest) {
+            self.log(format!("could not record prerequisite hashes: {err}"));
+        }
         self.log(format!("extracted {}", release.asset.name));
         Ok(())
     }
@@ -599,57 +724,27 @@ impl Agent {
         self.set_phase("deploying");
         if let Err(err) = swap_keeping_previous(staging, &self.config.install_dir) {
             let _ = fs::remove_dir_all(staging);
-            let reason = format!("swap failed: {err}");
-            if let Err(rollback_err) = self.rollback(&reason, saved_backup.as_deref()).await {
-                return Err(Fail::msg(
-                    500,
-                    format!(
-                        "Deploy failed ({reason}) and rollback failed: {}",
-                        rollback_err.message
-                    ),
-                ));
-            }
+            // The swap itself puts the previous tree back if the new tree cannot
+            // be moved in. That is a filesystem repair, not a failed-start rollback.
+            let _ = saved_backup;
+            let _ = self.start_installed().await;
             return Err(Fail::msg(
                 500,
-                format!("Deploy failed ({reason}). Previous build restored."),
+                format!(
+                    "Deploy failed (swap failed: {err}). The previous build was left in place."
+                ),
             ));
         }
         self.log(format!("swapped in {tag}"));
         if let Ok(mut slot) = self.version.lock() {
             *slot = tag.to_string();
         }
+        let _ = saved_backup;
 
-        self.set_phase("starting");
-        if let Err(err) = self.start_installed().await {
-            self.rollback(&err.message, saved_backup.as_deref()).await?;
-            return Err(Fail::msg(
-                500,
-                format!("Deploy failed ({}). Previous build restored.", err.message),
-            ));
+        if let Err(err) = self.boot_installed(tag, true).await {
+            return Err(err);
         }
-        if let Err(err) = self.health_check().await {
-            let reason = err;
-            if let Err(rollback_err) = self.rollback(&reason, saved_backup.as_deref()).await {
-                return Err(Fail::msg(
-                    500,
-                    format!(
-                        "Deploy failed ({reason}) and rollback failed: {}",
-                        rollback_err.message
-                    ),
-                ));
-            }
-            return Err(Fail::msg(
-                500,
-                format!("Deploy failed ({reason}). Previous build restored."),
-            ));
-        }
-        if let Err(err) = discard_previous(&self.config.install_dir) {
-            self.log(format!(
-                "online, but the previous copy could not be removed: {err}"
-            ));
-        } else {
-            self.log("removed previous install");
-        }
+        self.log("kept previous install for a signed rollback");
         let _ = fs::remove_dir_all(failed_dir_path(&self.config.install_dir));
         Ok(())
     }
@@ -683,44 +778,148 @@ impl Agent {
         Ok(())
     }
 
-    async fn rollback(&self, reason: &str, saved_backup: Option<&Path>) -> Result<(), Fail> {
-        self.set_phase("rolling-back");
-        self.log(format!("health check failed: {reason}"));
-        self.record_event("rollback", format!("rolling back: {reason}"));
-        self.log("rolling back to previous install");
-        let _ = self.kill_running().await;
-        let install = &self.config.install_dir;
-        let previous =
-            previous_install_dir(install).map_err(|err| Fail::msg(500, err.to_string()))?;
-        if previous.is_dir() {
-            restore_previous(install).map_err(|err| Fail::msg(500, err.to_string()))?;
-            if let Some(backup) = saved_backup {
-                match restore_saved_backup(install, backup) {
-                    Ok(()) => self.log(format!("restored Saved from {}", backup.display())),
-                    Err(err) => self.log(format!("could not restore Saved backup: {err}")),
-                }
-            }
-            let restored = read_version(install);
-            if let Ok(mut slot) = self.version.lock() {
-                *slot = restored;
-            }
-            self.log("restored previous install");
-            self.start_installed().await?;
-            self.health_check().await.map_err(|err| {
-                Fail::msg(500, format!("rolled-back build failed health check: {err}"))
-            })?;
-            self.log("restarted previous build");
-            Ok(())
-        } else {
-            self.log("no previous install; removing the failed build");
-            if install.exists() {
-                let _ = fs::remove_dir_all(install);
-            }
-            if let Ok(mut slot) = self.version.lock() {
-                slot.clear();
-            }
-            Err(Fail::msg(500, format!("server failed to start: {reason}")))
+    /// Start the installed build. On a failed health check, save logs and dumps
+    /// first, stay on this build, and do not restore the previous tree.
+    /// Prerequisites run before the first start when `prereqs` is set, and once
+    /// more if the process exits with a loader status.
+    async fn boot_installed(&self, tag: &str, prereqs: bool) -> Result<(), Fail> {
+        if prereqs {
+            self.run_prereqs(tag, false).await;
         }
+        self.set_phase("starting");
+        if let Err(err) = self.start_installed().await {
+            let snap = self.capture_failure(tag, &err.message);
+            self.latch_failed_start(tag, snap);
+            return Err(Fail::msg(500, stay_message(tag, &err.message)));
+        }
+        if let Err(err) = self.health_check().await {
+            let code = self.exit_code();
+            let snap = self.capture_failure(tag, &err);
+            let retried = self
+                .prereq_retried
+                .lock()
+                .map(|slot| slot.as_str() == tag)
+                .unwrap_or(true);
+            if crate::prereq::should_retry(code, retried) {
+                if let Ok(mut slot) = self.prereq_retried.lock() {
+                    *slot = tag.to_string();
+                }
+                self.log(
+                    "loader error; running bundled prerequisites once and retrying the start once",
+                );
+                self.run_prereqs(tag, true).await;
+                if self.start_installed().await.is_ok() && self.health_check().await.is_ok() {
+                    self.clear_failed_start();
+                    return Ok(());
+                }
+                let snap = self.capture_failure(tag, "retry after prerequisites failed");
+                self.latch_failed_start(tag, snap);
+                return Err(Fail::msg(
+                    500,
+                    stay_message(tag, "retry after prerequisites failed"),
+                ));
+            }
+            self.latch_failed_start(tag, snap);
+            return Err(Fail::msg(500, stay_message(tag, &err)));
+        }
+        self.clear_failed_start();
+        Ok(())
+    }
+
+    async fn run_prereqs(&self, tag: &str, force: bool) {
+        match crate::prereq::install_bundled(
+            &self.config.install_dir,
+            &self.config.work_dir,
+            tag,
+            force,
+        ) {
+            Ok(note) if !note.is_empty() => self.log(note),
+            Ok(_) => {}
+            Err(err) => self.log(format!("prerequisites not installed: {err}")),
+        }
+    }
+
+    fn capture_failure(&self, tag: &str, reason: &str) -> crate::diag::FailureSnapshot {
+        crate::diag::snapshot_failure(
+            &self.config.work_dir,
+            &self.config.install_dir,
+            &self.config.log_dir,
+            self.server_log_mark.load(Ordering::Acquire),
+            tag,
+            reason,
+            self.exit_code(),
+        )
+    }
+
+    fn latch_failed_start(&self, tag: &str, snap: crate::diag::FailureSnapshot) {
+        let report = FailedStart {
+            tag: tag.to_string(),
+            at: chrono::Utc::now().to_rfc3339(),
+            exit_code: self.exit_code(),
+            exit_text: snap.exit_text,
+            log_tail: snap.log_tail,
+            artifact_dir: snap.relative_dir.clone(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&report) {
+            let _ = fs::create_dir_all(&self.config.work_dir);
+            let _ = fs::write(self.config.work_dir.join("failed-start.json"), text);
+        }
+        if let Ok(mut slot) = self.failed_start.lock() {
+            *slot = Some(report.clone());
+        }
+        self.expect_running.store(false, Ordering::Release);
+        self.set_phase("failed-start");
+        self.record_event(
+            "failed-start",
+            format!(
+                "staying on {tag} ({}); evidence in {}",
+                report.exit_text, snap.relative_dir
+            ),
+        );
+        self.log(format!(
+            "failed start of {tag}; staying on this build; evidence in {}",
+            snap.relative_dir
+        ));
+    }
+
+    fn clear_failed_start(&self) {
+        if let Ok(mut slot) = self.failed_start.lock() {
+            *slot = None;
+        }
+        let _ = fs::remove_file(self.config.work_dir.join("failed-start.json"));
+    }
+
+    /// Signed manual rollback. Restores `{install}.previous` and starts it.
+    /// Never called from a failed health check.
+    pub async fn rollback_previous(&self) -> Result<AgentStatus, Fail> {
+        let _guard = self.begin_real()?;
+        let install = self.config.install_dir.clone();
+        let previous =
+            previous_install_dir(&install).map_err(|err| Fail::msg(500, err.to_string()))?;
+        if !previous.is_dir() {
+            return Err(Fail::msg(404, "No previous game build is on disk."));
+        }
+        self.log("manual rollback requested");
+        self.set_phase("rolling-back");
+        let result = async {
+            self.stop_running(true).await?;
+            restore_previous(&install).map_err(|err| Fail::msg(500, err.to_string()))?;
+            let restored = read_version(&install);
+            if let Ok(mut slot) = self.version.lock() {
+                *slot = restored.clone();
+            }
+            self.log(format!("manual rollback restored {restored}"));
+            self.record_event("manual-rollback", format!("restored {restored}"));
+            self.boot_installed(&restored, false).await?;
+            Ok::<(), Fail>(())
+        }
+        .await;
+        match &result {
+            Ok(()) => self.set_phase("idle"),
+            Err(_) => self.keep_failed_phase(),
+        }
+        result?;
+        Ok(self.status().await)
     }
 
     async fn stop_for(&self, style: &StopStyle) -> Result<(), Fail> {
@@ -903,6 +1102,12 @@ impl Agent {
             },
         )?;
         make_executable(&exe);
+        let log_path = self.config.log_dir.join("server.log");
+        let mark = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
+        self.server_log_mark.store(mark, Ordering::Release);
+        if let Ok(mut slot) = self.last_exit.lock() {
+            *slot = None;
+        }
         let args = launch_args(&self.config);
         let cwd = exe.parent().unwrap_or(self.config.install_dir.as_path());
         self.log(format!("starting {} {}", exe.display(), args.join(" ")));
@@ -979,7 +1184,13 @@ impl Agent {
 
     fn mark_started(&self) {
         self.expect_running.store(true, Ordering::Release);
-        self.record_event("start", format!("game server started ({})", read_version(&self.config.install_dir)));
+        self.record_event(
+            "start",
+            format!(
+                "game server started ({})",
+                read_version(&self.config.install_dir)
+            ),
+        );
         if let Ok(mut slot) = self.started_at.lock() {
             *slot = Some(Instant::now());
         }
@@ -1034,14 +1245,23 @@ impl Agent {
     async fn refresh_liveness(&self) {
         let mut guard = self.process.lock().await;
         if let Some(running) = guard.as_mut() {
-            let alive = if let Some(child) = running.child.as_mut() {
-                matches!(child.try_wait(), Ok(None))
+            let (alive, code) = if let Some(child) = running.child.as_mut() {
+                match child.try_wait() {
+                    Ok(None) => (true, None),
+                    Ok(Some(status)) => (false, status.code()),
+                    Err(_) => (false, None),
+                }
             } else {
-                pid_alive(running.pid)
+                (pid_alive(running.pid), None)
             };
             if alive {
                 self.online.store(true, Ordering::Release);
             } else {
+                if let Some(code) = code {
+                    if let Ok(mut slot) = self.last_exit.lock() {
+                        *slot = Some(code);
+                    }
+                }
                 if let Some(mut bridge) = running.bridge.take() {
                     let _ = bridge.kill();
                     let _ = bridge.wait();
@@ -1052,7 +1272,10 @@ impl Agent {
                 drop(guard);
                 if self.expect_running.load(Ordering::Acquire) {
                     let phase = self.phase.lock().map(|p| p.clone()).unwrap_or_default();
-                    self.record_event("exit", format!("game server process exited (phase {phase})"));
+                    self.record_event(
+                        "exit",
+                        format!("game server process exited (phase {phase})"),
+                    );
                 }
                 self.mark_offline();
                 return;
@@ -1132,6 +1355,25 @@ fn read_version(dir: &Path) -> String {
         .to_string()
 }
 
+fn previous_version(install: &Path) -> String {
+    previous_install_dir(install)
+        .ok()
+        .filter(|path| path.is_dir())
+        .map(|path| read_version(&path))
+        .unwrap_or_default()
+}
+
+fn stay_message(tag: &str, reason: &str) -> String {
+    format!(
+        "Staying on {tag} after a failed start ({reason}). Previous build kept for POST /v1/rollback."
+    )
+}
+
+fn load_persisted_failure(work: &Path) -> Option<FailedStart> {
+    let text = fs::read_to_string(work.join("failed-start.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 fn player_count(install: &Path) -> Option<u32> {
     crate::monitor::read_player_status(install).and_then(|p| p.count)
 }
@@ -1151,7 +1393,9 @@ fn backup_saved(install: &Path, backup_root: &Path) -> Result<Option<PathBuf>, S
 }
 
 fn modified(path: &Path) -> std::time::SystemTime {
-    fs::metadata(path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH)
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 fn stamp_of(path: &Path) -> String {
@@ -1164,13 +1408,19 @@ fn newest_file(dir: &Path, ext: Option<&str>) -> Option<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file())
-        .filter(|p| ext.map_or(true, |x| p.extension().map_or(false, |e| e.eq_ignore_ascii_case(x))))
+        .filter(|p| {
+            ext.map_or(true, |x| {
+                p.extension().map_or(false, |e| e.eq_ignore_ascii_case(x))
+            })
+        })
         .max_by_key(|p| modified(p))
 }
 
 fn tail_lines(path: &Path, lines: usize) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = fs::File::open(path) else { return String::new() };
+    let Ok(mut file) = fs::File::open(path) else {
+        return String::new();
+    };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(256 * 1024);
     let _ = file.seek(SeekFrom::Start(start));
@@ -1185,7 +1435,7 @@ fn log_entry(path: &Path, lines: usize) -> serde_json::Value {
     serde_json::json!({
         "file": path.display().to_string(),
         "modified": stamp_of(path),
-        "tail": tail_lines(path, lines),
+        "tail": crate::diag::redact(&tail_lines(path, lines)),
     })
 }
 
@@ -1630,7 +1880,10 @@ impl Agent {
     pub async fn restore_backup(&self, name: &str) -> Result<AgentStatus, Fail> {
         let name = name.trim();
         if !is_backup_stamp(name) {
-            return Err(Fail::msg(400, "backup must be a YYYYMMDD-HHMMSS folder name from the backup list"));
+            return Err(Fail::msg(
+                400,
+                "backup must be a YYYYMMDD-HHMMSS folder name from the backup list",
+            ));
         }
         let backup = self.config.backup_dir.join(name);
         if !backup.is_dir() {
@@ -1642,8 +1895,13 @@ impl Agent {
         let result = async {
             self.stop_running(true).await?;
             self.set_phase("backing-up");
-            let before = backup_saved(&self.config.install_dir, &self.config.backup_dir)
-                .map_err(|e| Fail::msg(500, format!("could not back up the current Saved first: {e}")))?;
+            let before =
+                backup_saved(&self.config.install_dir, &self.config.backup_dir).map_err(|e| {
+                    Fail::msg(
+                        500,
+                        format!("could not back up the current Saved first: {e}"),
+                    )
+                })?;
             if let Some(path) = &before {
                 self.log(format!("current Saved backed up to {}", path.display()));
             }
@@ -1652,7 +1910,12 @@ impl Agent {
                 .map_err(|e| Fail::msg(500, format!("restore failed: {e}")))?;
             self.set_phase("starting");
             self.start_installed().await?;
-            self.health_check().await.map_err(|e| Fail::msg(500, format!("restored, but the server failed its health check: {e}")))?;
+            self.health_check().await.map_err(|e| {
+                Fail::msg(
+                    500,
+                    format!("restored, but the server failed its health check: {e}"),
+                )
+            })?;
             Ok::<(), Fail>(())
         }
         .await;
@@ -1678,7 +1941,10 @@ impl Agent {
         });
         let _ = fs::create_dir_all(&self.config.work_dir);
         let path = self.config.work_dir.join("events.jsonl");
-        if fs::metadata(&path).map(|m| m.len() > 2_000_000).unwrap_or(false) {
+        if fs::metadata(&path)
+            .map(|m| m.len() > 2_000_000)
+            .unwrap_or(false)
+        {
             let _ = fs::rename(&path, self.config.work_dir.join("events.old.jsonl"));
         }
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
@@ -1687,7 +1953,8 @@ impl Agent {
     }
 
     pub(crate) fn recent_events(&self, max: usize) -> Vec<serde_json::Value> {
-        let text = fs::read_to_string(self.config.work_dir.join("events.jsonl")).unwrap_or_default();
+        let text =
+            fs::read_to_string(self.config.work_dir.join("events.jsonl")).unwrap_or_default();
         let mut out: Vec<serde_json::Value> = text
             .lines()
             .rev()
@@ -1707,7 +1974,9 @@ impl Agent {
         if self.online.load(Ordering::Acquire) || !self.config.install_dir.exists() {
             return;
         }
-        let Ok(_guard) = self.begin_real() else { return };
+        let Ok(_guard) = self.begin_real() else {
+            return;
+        };
         let recent = {
             let mut list = self.crash_restarts.lock().unwrap();
             list.retain(|t| t.elapsed() < Duration::from_secs(3600));
@@ -1716,11 +1985,22 @@ impl Agent {
         };
         if recent > 3 {
             self.expect_running.store(false, Ordering::Release);
-            self.record_event("crash-loop", "game server crashed 3 times within an hour; watchdog stopped restarting it");
+            let tag = read_version(&self.config.install_dir);
+            let snap = self.capture_failure(&tag, "crash loop; not restarting");
+            self.latch_failed_start(&tag, snap);
+            self.record_event(
+                "crash-loop",
+                "game server crashed 3 times within an hour; watchdog stopped restarting it",
+            );
             self.log("watchdog: crash loop, not restarting the game server again");
             return;
         }
-        self.record_event("crash-restart", "game server was down; watchdog restarting it");
+        let tag = read_version(&self.config.install_dir);
+        let _ = self.capture_failure(&tag, "game server process exited");
+        self.record_event(
+            "crash-restart",
+            "game server was down; watchdog restarting it",
+        );
         self.log("watchdog: game server is down; restarting it");
         self.set_phase("starting");
         let started = self.start_installed().await;

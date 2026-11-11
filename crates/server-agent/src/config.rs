@@ -24,6 +24,12 @@ pub struct AutoUpdateConfig {
     pub daily_restart: bool,
     pub keep_backups: u32,
     pub grace_seconds: u64,
+    /// Always `on-demand` in 0.3.12. Older files that omit it still boot this way.
+    pub update_mode: String,
+    /// Report-only GitHub poll. 5–15, default 10. This does not install.
+    pub check_interval_minutes: u64,
+    /// Always `stay`. A failed game start is not rolled back.
+    pub on_failed_start: String,
 }
 
 impl AutoUpdateConfig {
@@ -44,6 +50,9 @@ impl AutoUpdateConfig {
             daily_restart: true,
             keep_backups: 7,
             grace_seconds: 180,
+            update_mode: "on-demand".into(),
+            check_interval_minutes: 10,
+            on_failed_start: "stay".into(),
         }
     }
 
@@ -160,6 +169,8 @@ pub struct AgentConfig {
     pub secret: String,
     pub auto_update: AutoUpdateConfig,
     pub account_server: AccountServerConfig,
+    /// agent.json this process loaded. Empty when a test built the config in memory.
+    pub source_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +256,22 @@ struct AutoUpdateFile {
     keep_backups: u32,
     #[serde(default = "default_grace")]
     grace_seconds: u64,
+    #[serde(default = "default_update_mode")]
+    update_mode: String,
+    #[serde(default = "default_check_interval")]
+    check_interval_minutes: u64,
+    #[serde(default = "default_on_failed")]
+    on_failed_start: String,
+}
+
+fn default_update_mode() -> String {
+    "on-demand".into()
+}
+fn default_check_interval() -> u64 {
+    10
+}
+fn default_on_failed() -> String {
+    "stay".into()
 }
 
 fn default_interval_hours() -> f64 {
@@ -297,6 +324,9 @@ impl Default for AutoUpdateFile {
             daily_restart: base.daily_restart,
             keep_backups: base.keep_backups,
             grace_seconds: base.grace_seconds,
+            update_mode: base.update_mode,
+            check_interval_minutes: base.check_interval_minutes,
+            on_failed_start: base.on_failed_start,
         }
     }
 }
@@ -452,6 +482,7 @@ pub fn load_config() -> Result<AgentConfig, String> {
         serde_json::from_str(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     let secret = load_secret(&path)?;
     let mut config = file.into_config(secret)?;
+    config.source_path = path.clone();
     if let Some(value) = env_nonempty("UXA_AGENT_INSTALL") {
         config.install_dir = PathBuf::from(value);
     }
@@ -523,6 +554,7 @@ impl FileConfig {
             secret,
             auto_update: map_auto(self.auto_update),
             account_server: map_accounts(self.account_server),
+            source_path: PathBuf::new(),
         })
     }
 }
@@ -564,6 +596,17 @@ fn map_auto(file: AutoUpdateFile) -> AutoUpdateConfig {
         daily_restart: file.daily_restart,
         keep_backups: file.keep_backups,
         grace_seconds: file.grace_seconds,
+        // 0.3.12 ignores any other mode. An old agent.json must come up on-demand
+        // with no hand edit, which is what cancels the 03:00 install.
+        update_mode: {
+            let _requested = file.update_mode;
+            "on-demand".into()
+        },
+        check_interval_minutes: file.check_interval_minutes,
+        on_failed_start: {
+            let _requested = file.on_failed_start;
+            "stay".into()
+        },
     }
 }
 
@@ -600,14 +643,19 @@ impl AgentConfig {
                 .install_dir
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty());
-            self.account_server.install_dir = parent.unwrap_or(Path::new(".")).join("FNFAccountServer");
+            self.account_server.install_dir =
+                parent.unwrap_or(Path::new(".")).join("FNFAccountServer");
         }
         // The account server is never exposed directly any more (an old agent.json may still say
         // 0.0.0.0): sign-ups come in through the agent's /fnf-accounts proxy on its own listener.
-        if !matches!(self.account_server.host.trim(), "127.0.0.1" | "localhost" | "::1") {
+        if !matches!(
+            self.account_server.host.trim(),
+            "127.0.0.1" | "localhost" | "::1"
+        ) {
             self.account_server.host = "127.0.0.1".into();
         }
-        if matches!(self.account_server.port, 7777 | 7797) || self.account_server.port == self.port {
+        if matches!(self.account_server.port, 7777 | 7797) || self.account_server.port == self.port
+        {
             return Err(format!(
                 "accountServer.port {} collides with a game port. Use TCP 7798.",
                 self.account_server.port
@@ -645,10 +693,162 @@ impl AgentConfig {
                 ));
             }
         }
+        if !(5..=15).contains(&self.auto_update.check_interval_minutes) {
+            return Err(
+                "autoUpdate.checkIntervalMinutes must be between 5 and 15. The default is 10."
+                    .into(),
+            );
+        }
+        self.auto_update.update_mode = "on-demand".into();
+        self.auto_update.on_failed_start = "stay".into();
         Ok(())
     }
 
     pub fn tls_enabled(&self) -> bool {
         !self.tls_cert.as_os_str().is_empty() && !self.tls_key.as_os_str().is_empty()
     }
+}
+
+/// Fields a signed PATCH may change. Everything else stays as it was at boot.
+#[derive(Debug, Clone)]
+pub struct LivePolicy {
+    pub update_mode: String,
+    pub check_interval_minutes: u64,
+    pub on_failed_start: String,
+    pub owner: String,
+    pub repo: String,
+}
+
+impl LivePolicy {
+    pub fn from_config(config: &AgentConfig) -> Self {
+        Self {
+            update_mode: config.auto_update.update_mode.clone(),
+            check_interval_minutes: config.auto_update.check_interval_minutes,
+            on_failed_start: config.auto_update.on_failed_start.clone(),
+            owner: config.owner.clone(),
+            repo: config.repo.clone(),
+        }
+    }
+}
+
+const PATCH_KEYS: &[&str] = &[
+    "updateMode",
+    "repo",
+    "owner",
+    "checkIntervalMinutes",
+    "onFailedStart",
+];
+
+fn valid_repo_name(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo.len() <= 80
+        && !repo.contains("..")
+        && repo
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+/// Apply a signed config patch onto the JSON object that is agent.json.
+/// Unknown keys are rejected. `repo` is stored only with owner `uXa-Sloppy`.
+pub fn apply_config_patch(
+    current: &mut serde_json::Value,
+    patch: &serde_json::Value,
+) -> Result<LivePolicy, String> {
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| "config patch must be a JSON object".to_string())?;
+    if patch.is_empty() {
+        return Err("config patch is empty".into());
+    }
+    for key in patch.keys() {
+        if !PATCH_KEYS.contains(&key.as_str()) {
+            return Err(format!("\"{key}\" cannot be changed remotely"));
+        }
+    }
+    if let Some(mode) = patch.get("updateMode") {
+        if mode.as_str() != Some("on-demand") {
+            return Err("updateMode can only be \"on-demand\"".into());
+        }
+    }
+    if let Some(stay) = patch.get("onFailedStart") {
+        if stay.as_str() != Some("stay") {
+            return Err("onFailedStart can only be \"stay\"".into());
+        }
+    }
+    if let Some(minutes) = patch.get("checkIntervalMinutes") {
+        let minutes = minutes
+            .as_u64()
+            .ok_or_else(|| "checkIntervalMinutes must be an integer".to_string())?;
+        if !(5..=15).contains(&minutes) {
+            return Err("checkIntervalMinutes must be between 5 and 15".into());
+        }
+    }
+    if let Some(owner) = patch.get("owner") {
+        if owner.as_str() != Some("uXa-Sloppy") {
+            return Err("owner is pinned to uXa-Sloppy".into());
+        }
+    }
+    if let Some(repo) = patch.get("repo") {
+        let repo = repo
+            .as_str()
+            .ok_or_else(|| "repo must be a string".to_string())?;
+        if !valid_repo_name(repo) {
+            return Err("repo must be a single GitHub repository name".into());
+        }
+        let owner = current
+            .get("owner")
+            .and_then(|value| value.as_str())
+            .unwrap_or("uXa-Sloppy");
+        if owner != "uXa-Sloppy" {
+            return Err("repo is pinned to owner uXa-Sloppy".into());
+        }
+    }
+    let obj = current
+        .as_object_mut()
+        .ok_or_else(|| "agent config must be a JSON object".to_string())?;
+    if patch.contains_key("repo") {
+        obj.insert("repo".into(), patch["repo"].clone());
+        obj.insert("owner".into(), serde_json::json!("uXa-Sloppy"));
+    }
+    if patch.contains_key("owner") {
+        obj.insert("owner".into(), serde_json::json!("uXa-Sloppy"));
+    }
+    if patch.keys().any(|key| key != "repo" && key != "owner") {
+        let auto = obj
+            .entry("autoUpdate")
+            .or_insert_with(|| serde_json::json!({}));
+        let auto = auto
+            .as_object_mut()
+            .ok_or_else(|| "autoUpdate must be an object".to_string())?;
+        if let Some(mode) = patch.get("updateMode") {
+            auto.insert("updateMode".into(), mode.clone());
+        }
+        if let Some(stay) = patch.get("onFailedStart") {
+            auto.insert("onFailedStart".into(), stay.clone());
+        }
+        if let Some(minutes) = patch.get("checkIntervalMinutes") {
+            auto.insert("checkIntervalMinutes".into(), minutes.clone());
+        }
+    }
+    let owner = current
+        .get("owner")
+        .and_then(|value| value.as_str())
+        .unwrap_or("uXa-Sloppy")
+        .to_string();
+    let repo = current
+        .get("repo")
+        .and_then(|value| value.as_str())
+        .unwrap_or("FridayNightFights-Releases")
+        .to_string();
+    let auto = current.get("autoUpdate");
+    Ok(LivePolicy {
+        update_mode: "on-demand".into(),
+        check_interval_minutes: auto
+            .and_then(|value| value.get("checkIntervalMinutes"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(10),
+        on_failed_start: "stay".into(),
+        owner,
+        repo,
+    })
 }

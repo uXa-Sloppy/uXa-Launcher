@@ -34,6 +34,9 @@ pub fn parse_zone(name: &str) -> Result<Tz, String> {
 }
 
 /// Local civil time, DST-aware. A spring-forward gap moves to the next valid minute.
+/// The agent no longer installs on this clock. The helpers stay so the window tests
+/// keep describing 03:00 America/New_York.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn in_zone(date: NaiveDate, time: NaiveTime, tz: Tz) -> DateTime<Utc> {
     let naive = date.and_time(time);
     match tz.from_local_datetime(&naive) {
@@ -52,6 +55,7 @@ pub fn in_zone(date: NaiveDate, time: NaiveTime, tz: Tz) -> DateTime<Utc> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn next_restart(now: DateTime<Utc>, time: NaiveTime, tz: Tz) -> DateTime<Utc> {
     let local_date = now.with_timezone(&tz).date_naive();
     let today = in_zone(local_date, time, tz);
@@ -64,6 +68,7 @@ pub fn next_restart(now: DateTime<Utc>, time: NaiveTime, tz: Tz) -> DateTime<Utc
 }
 
 /// True once per civil day, from `time` until `time + window`, in `tz`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn maintenance_due(
     now: DateTime<Utc>,
     time: NaiveTime,
@@ -79,11 +84,13 @@ pub fn maintenance_due(
     now >= start && now < start + window
 }
 
+#[allow(dead_code)]
 pub fn local_date(now: DateTime<Utc>, tz: Tz) -> NaiveDate {
     now.with_timezone(&tz).date_naive()
 }
 
 /// Startup check, then every `interval`, plus any clock times after the previous check.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn check_due(
     now: DateTime<Utc>,
     booted: DateTime<Utc>,
@@ -115,6 +122,7 @@ pub fn check_due(
     false
 }
 
+#[allow(dead_code)]
 pub fn format_local(instant: DateTime<Utc>, tz: Tz) -> String {
     instant
         .with_timezone(&tz)
@@ -122,6 +130,7 @@ pub fn format_local(instant: DateTime<Utc>, tz: Tz) -> String {
         .to_string()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tick {
     Maintenance,
@@ -131,6 +140,7 @@ pub enum Tick {
 
 /// Maintenance wins over a startup check so a process that starts at 03:00
 /// does not wait out `checkAfterStartSecs` and miss the window.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn decide_tick(
     now: DateTime<Utc>,
     booted: DateTime<Utc>,
@@ -162,6 +172,35 @@ pub fn decide_tick(
     Tick::Sleep
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDemandTick {
+    /// Ask GitHub what is published and record it. Does not download or install.
+    Report,
+    Sleep,
+}
+
+/// Report-only clock. There is no install or restart variant: a tick during the
+/// old 03:00 window still cannot install a staged build.
+pub fn on_demand_tick(
+    now: DateTime<Utc>,
+    booted: DateTime<Utc>,
+    startup_delay: Duration,
+    interval: Duration,
+    last_check: Option<DateTime<Utc>>,
+    startup_done: bool,
+) -> OnDemandTick {
+    if !startup_done && now >= booted + startup_delay {
+        return OnDemandTick::Report;
+    }
+    if let Some(last) = last_check {
+        if interval > Duration::zero() && now >= last + interval {
+            return OnDemandTick::Report;
+        }
+    }
+    OnDemandTick::Sleep
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn interval_from_hours(hours: f64) -> Option<Duration> {
     if !hours.is_finite() || hours <= 0.0 {
         return None;
@@ -393,5 +432,30 @@ mod tests {
         assert!(interval_from_hours(0.0).is_none());
         assert!(interval_from_hours(-1.0).is_none());
         assert_eq!(interval_from_hours(6.0), Some(Duration::hours(6)));
+    }
+
+    #[test]
+    fn three_am_on_nov_12_2026_does_not_install() {
+        // 12 Nov 2026 03:00 America/New_York is 08:00 UTC (EST, after the November fallback).
+        let window = at(2026, 11, 12, 8, 0);
+        let booted = at(2026, 11, 12, 7, 0);
+        let recent = on_demand_tick(
+            window,
+            booted,
+            Duration::seconds(30),
+            Duration::minutes(10),
+            Some(window - Duration::minutes(1)),
+            true,
+        );
+        assert_eq!(recent, OnDemandTick::Sleep);
+        let due = on_demand_tick(
+            window,
+            booted,
+            Duration::seconds(30),
+            Duration::minutes(10),
+            Some(at(2026, 11, 12, 7, 40)),
+            true,
+        );
+        assert_eq!(due, OnDemandTick::Report);
     }
 }
