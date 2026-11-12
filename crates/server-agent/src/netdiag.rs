@@ -1377,7 +1377,12 @@ fn run_command(
     });
     let (err_tx, err_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let text = stderr.map(read_capped).unwrap_or_default();
+        let text = match stderr {
+            Some(reader) => read_capped(reader),
+            None => CmdText {
+                text: String::new(),
+            },
+        };
         let _ = err_tx.send(text);
     });
     let started = Instant::now();
