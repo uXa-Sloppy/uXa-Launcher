@@ -82,6 +82,24 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// `key=` / `token=` (and the other secret labels) only. Addresses stay so a
+/// diagnostic reply can show the operator the IPs they asked for.
+pub fn redact_secrets_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if let Some(len) = secret_at(text, i) {
+            out.push_str("[redacted]");
+            i += len;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 fn secret_at(text: &str, start: usize) -> Option<usize> {
     const KEYS: &[&str] = &[
         "key",
@@ -120,7 +138,7 @@ fn secret_at(text: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn ipv4_at(text: &str, start: usize) -> Option<usize> {
+pub(crate) fn ipv4_at(text: &str, start: usize) -> Option<usize> {
     let rest = text.get(start..)?;
     let mut parts = 0;
     let mut idx = 0;

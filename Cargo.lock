@@ -2324,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "launcher-core"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "chrono",
  "futures-util",
@@ -5014,7 +5014,7 @@ dependencies = [
 
 [[package]]
 name = "uxa-launcher"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "dirs 6.0.0",
  "keyring",
@@ -5033,7 +5033,7 @@ dependencies = [
 
 [[package]]
 name = "uxa-server-agent"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "axum",
  "axum-server",

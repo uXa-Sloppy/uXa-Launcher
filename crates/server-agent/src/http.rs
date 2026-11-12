@@ -369,13 +369,31 @@ async fn dispatch(
                     Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
                 }
             };
-            agent.deploy(&tag).await.map(|status| {
-                Reply::Action(AgentAction {
-                    ok: true,
-                    message: format!("Deployed {}.", status.version),
-                    status,
-                })
-            })
+            // Detach the deploy from this request. Cloudflare closes the client
+            // at about 100s (524) and axum then drops the handler. Awaiting
+            // deploy() here cancelled the health wait while phase was still
+            // "starting", so the "deployed <tag>" event was never recorded.
+            // The spawned task is the same deploy(); the oneshot still returns
+            // that result when the client stays connected.
+            let worker = Arc::clone(&agent);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let result = worker.deploy(&tag).await;
+                let _ = tx.send(result);
+            });
+            match rx.await {
+                Ok(result) => result.map(|status| {
+                    Reply::Action(AgentAction {
+                        ok: true,
+                        message: format!("Deployed {}.", status.version),
+                        status,
+                    })
+                }),
+                Err(_) => Err(crate::runtime::Fail {
+                    http: 500,
+                    message: "deploy stopped before it finished".into(),
+                }),
+            }
         }
         ("GET", "/v1/monitor") => {
             return axum::Json(agent.monitor().await).into_response();
@@ -534,6 +552,27 @@ async fn dispatch(
             ))
             .into_response();
         }
+        ("GET", "/v1/diag/net") => {
+            let expect_raw = query_string(&uri, "expect");
+            let expect = if expect_raw.trim().is_empty() {
+                None
+            } else {
+                match crate::netdiag::parse_exact_ipv4(&expect_raw) {
+                    Some(ip) => Some(ip),
+                    None => {
+                        return json_error(StatusCode::BAD_REQUEST, "expect must be an IPv4 address")
+                    }
+                }
+            };
+            let port = match crate::netdiag::parse_diag_port(
+                &query_string(&uri, "port"),
+                agent.config.port,
+            ) {
+                Ok(port) => port,
+                Err(err) => return json_error(StatusCode::BAD_REQUEST, &err),
+            };
+            return axum::Json(crate::netdiag::collect(&agent, port, expect).await).into_response();
+        }
         ("POST", "/v1/wipe") => {
             let ok = serde_json::from_slice::<WipeBody>(&body)
                 .map(|b| b.confirm == "WIPE")
@@ -560,7 +599,7 @@ async fn dispatch(
             "GET" | "POST" | "PATCH",
             "/v1/status" | "/v1/releases" | "/v1/logs" | "/v1/deploy" | "/v1/restart" | "/v1/stop" | "/v1/wipe" | "/v1/serverlog"
             | "/v1/monitor" | "/v1/accounts/status" | "/v1/accounts/restart" | "/v1/accounts/deploy" | "/v1/accounts/invite" | "/v1/agent/update" | "/v1/backups/restore"
-            | "/v1/check" | "/v1/rollback" | "/v1/config" | "/v1/diag/logs" | "/v1/diag/crashes" | "/v1/diag/crashes/download" | "/v1/diag/events" | "/v1/diag/prereqs",
+            | "/v1/check" | "/v1/rollback" | "/v1/config" | "/v1/diag/logs" | "/v1/diag/crashes" | "/v1/diag/crashes/download" | "/v1/diag/events" | "/v1/diag/prereqs" | "/v1/diag/net",
         ) => {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.");
         }

@@ -6,6 +6,7 @@ mod config;
 mod diag;
 mod http;
 mod monitor;
+mod netdiag;
 mod prereq;
 mod runtime;
 mod schedule;

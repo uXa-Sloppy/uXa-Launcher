@@ -327,9 +327,14 @@ do not open a window. They still run when the window is already open.
 --agent <GET|POST> <path> [json]
     Signed call to the selected server agent; prints its JSON reply. Examples:
       --agent GET /v1/monitor
+      --agent GET \"/v1/diag/net?expect=<ip>\"
       --agent POST /v1/accounts/deploy {{\"tag\":\"v0.9.9\"}}
       --agent POST /v1/agent/update
       --agent POST /v1/wipe {{\"confirm\":\"WIPE\"}}
+
+    GET /v1/diag/net reads the public IP, inbound firewall rules, UDP
+    listeners, and LAN addresses. It does not change the firewall or the
+    server. The reply keeps IP addresses.
 
 --mint-invite <note>
     Make a one-time pre-alpha invite key on this PC, add only its SHA-256 to

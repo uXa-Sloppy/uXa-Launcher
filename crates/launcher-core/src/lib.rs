@@ -68,5 +68,5 @@ pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
 pub use version::{is_newer, parse_version, GameVersion};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
-pub const USER_AGENT: &str = "uXa-Launcher/0.3.12";
+pub const USER_AGENT: &str = "uXa-Launcher/0.3.13";
 pub const DEFAULT_WEB_VERSION_PATTERN: &str = r"Build\s+(\d+)\s*,\s*last updated\s+([^<\r\n]+)";
