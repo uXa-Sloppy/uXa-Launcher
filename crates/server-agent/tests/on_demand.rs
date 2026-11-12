@@ -310,4 +310,74 @@ async fn check_config_and_diag_do_not_escape_scope() {
     } else {
         assert_eq!(events["available"], false);
     }
+
+    fs::create_dir_all(install.join("FridayNightFights/Binaries/Win64")).unwrap();
+    fs::write(
+        install.join("FridayNightFights/Binaries/Win64/FridayNightFightsServer-Win64-Shipping.exe"),
+        b"MZ",
+    )
+    .unwrap();
+    fs::write(install.join("Saved/skip-Win64-Shipping.exe"), b"no").unwrap();
+    let net: serde_json::Value = serde_json::from_str(
+        &call(
+            &http,
+            &base,
+            &secret,
+            "GET",
+            "/v1/diag/net?expect=203.0.113.50",
+            b"",
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(net["port"], 7777);
+    assert!(net["firewall"]["rules"].is_array(), "{net}");
+    assert!(net["listening"]["endpoints"].is_array(), "{net}");
+    assert!(net["lan"]["addresses"].is_array(), "{net}");
+    let rendered = net.to_string();
+    assert!(
+        rendered.contains("FridayNightFightsServer-Win64-Shipping.exe"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("skip-Win64-Shipping"), "{rendered}");
+    match &net["publicIpMatchesExpected"] {
+        serde_json::Value::Null => assert!(net["publicIp"].is_null(), "{net}"),
+        serde_json::Value::Bool(matched) => {
+            let ip = net["publicIp"].as_str().unwrap();
+            assert!(ip.contains('.'), "{ip}");
+            assert!(!ip.contains("redacted"), "{ip}");
+            assert_eq!(*matched, ip == "203.0.113.50", "{net}");
+        }
+        other => panic!("publicIpMatchesExpected should be bool or null, got {other}"),
+    }
+    if let Some(addresses) = net["lan"]["addresses"].as_array() {
+        for addr in addresses {
+            let ip = addr["address"].as_str().unwrap_or("");
+            assert!(!ip.contains("redacted"), "{ip}");
+            assert!(!ip.starts_with("127."), "{ip}");
+            assert!(!ip.starts_with("169.254."), "{ip}");
+        }
+    }
+    let bad_port = call(&http, &base, &secret, "GET", "/v1/diag/net?port=9", b"")
+        .await
+        .expect_err("port");
+    assert!(
+        bad_port.contains("7777") || bad_port.contains("port"),
+        "{bad_port}"
+    );
+    let bad_expect = call(
+        &http,
+        &base,
+        &secret,
+        "GET",
+        "/v1/diag/net?expect=not-an-ip",
+        b"",
+    )
+    .await
+    .expect_err("expect");
+    assert!(
+        bad_expect.contains("IPv4") || bad_expect.contains("expect"),
+        "{bad_expect}"
+    );
 }
