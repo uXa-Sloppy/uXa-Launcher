@@ -35,14 +35,21 @@ const IP_SOURCES: &[(&str, &str)] = &[
     ("icanhazip.com", "https://icanhazip.com"),
 ];
 
-/// PowerShell is read-only: Get-NetUDPEndpoint, Get-NetIPAddress, Get-NetRoute,
-/// Get-NetConnectionProfile, and Win32_Process. Firewall rules come from
-/// `netsh advfirewall firewall show rule name=all verbose` because walking
-/// every rule through Get-NetFirewallPortFilter does not fit in the time bound.
+/// PowerShell is read-only. Firewall rules still come from `netsh`, because
+/// walking every rule through Get-NetFirewallPortFilter does not fit in the
+/// time bound. The script writes one JSON line on the console stdout as UTF-8
+/// with no BOM, so a service session cannot turn it into CLIXML or UTF-16.
 #[cfg(windows)]
 const HOST_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$utf8 = New-Object System.Text.UTF8Encoding $false
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+try { Import-Module NetTCPIP -ErrorAction Stop | Out-Null } catch {}
+try { Import-Module NetConnection -ErrorAction Stop | Out-Null } catch {}
 $port = 7777
 if ($env:UXA_DIAG_PORT -match '^\d{1,5}$') {
   $n = [int]$env:UXA_DIAG_PORT
@@ -66,10 +73,10 @@ try {
     try { $own = [int]$ep.OwningProcess } catch { $own = 0 }
     if ($own -gt 0) {
       try {
-        $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$own" -ErrorAction Stop
-        if ($null -ne $proc) {
-          $name = [string]$proc.Name
-          $exe = [string]$proc.ExecutablePath
+        $proc = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$own" -ErrorAction Stop)
+        if ($proc.Count -gt 0) {
+          $name = [string]$proc[0].Name
+          $exe = [string]$proc[0].ExecutablePath
         }
       } catch {}
     }
@@ -81,7 +88,7 @@ try {
       processPath = $exe
     }) | Out-Null
   }
-  if ($list.Count -gt 0) { $endpoints = $list.ToArray() }
+  $endpoints = @($list.ToArray())
 } catch {
   $listeningError = [string]$_.Exception.Message
 }
@@ -94,7 +101,7 @@ try {
       prefixLength = [int]$a.PrefixLength
     }) | Out-Null
   }
-  if ($addrList.Count -gt 0) { $addresses = $addrList.ToArray() }
+  $addresses = @($addrList.ToArray())
   $gwList = New-Object System.Collections.Generic.List[object]
   foreach ($g in @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
     $metric = 0
@@ -105,7 +112,7 @@ try {
       routeMetric = $metric
     }) | Out-Null
   }
-  if ($gwList.Count -gt 0) { $gateways = $gwList.ToArray() }
+  $gateways = @($gwList.ToArray())
   $catList = New-Object System.Collections.Generic.List[object]
   foreach ($c in @(Get-NetConnectionProfile -ErrorAction SilentlyContinue)) {
     $catList.Add([pscustomobject]@{
@@ -114,7 +121,7 @@ try {
       networkCategory = [string]$c.NetworkCategory
     }) | Out-Null
   }
-  if ($catList.Count -gt 0) { $profiles = $catList.ToArray() }
+  $profiles = @($catList.ToArray())
 } catch {
   $lanError = [string]$_.Exception.Message
 }
@@ -132,20 +139,63 @@ try {
       executablePath = [string]$p.ExecutablePath
     }) | Out-Null
   }
-  if ($procList.Count -gt 0) { $processes = $procList.ToArray() }
+  $processes = @($procList.ToArray())
 } catch {
   $processesError = [string]$_.Exception.Message
 }
-[pscustomobject]@{
+$payload = [pscustomobject]@{
   listeningError = $listeningError
-  endpoints = $endpoints
+  endpoints = @($endpoints)
   lanError = $lanError
-  addresses = $addresses
-  gateways = $gateways
-  profiles = $profiles
+  addresses = @($addresses)
+  gateways = @($gateways)
+  profiles = @($profiles)
   processesError = $processesError
-  processes = $processes
-} | ConvertTo-Json -Depth 5 -Compress
+  processes = @($processes)
+}
+$json = ConvertTo-Json -InputObject $payload -Depth 4 -Compress
+[Console]::Out.WriteLine($json)
+"#;
+
+/// Used only when the main snapshot did not include a process table. Read-only.
+#[cfg(windows)]
+const PROCESS_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$utf8 = New-Object System.Text.UTF8Encoding $false
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$processesError = $null
+$list = New-Object System.Collections.Generic.List[object]
+try {
+  foreach ($p in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+    $pidN = 0
+    $ppid = 0
+    try { $pidN = [int]$p.ProcessId } catch { $pidN = 0 }
+    try { $ppid = [int]$p.ParentProcessId } catch { $ppid = 0 }
+    $list.Add([pscustomobject]@{
+      processId = $pidN
+      parentProcessId = $ppid
+      name = [string]$p.Name
+      executablePath = [string]$p.ExecutablePath
+    }) | Out-Null
+  }
+} catch {
+  $processesError = [string]$_.Exception.Message
+}
+$payload = [pscustomobject]@{
+  listeningError = $null
+  endpoints = @()
+  lanError = $null
+  addresses = @()
+  gateways = @()
+  profiles = @()
+  processesError = $processesError
+  processes = @($list.ToArray())
+}
+$json = ConvertTo-Json -InputObject $payload -Depth 4 -Compress
+[Console]::Out.WriteLine($json)
 "#;
 
 pub fn parse_diag_port(raw: &str, game_port: u16) -> Result<u16, String> {
@@ -265,6 +315,8 @@ struct LocalRaw {
     firewall_error: Option<String>,
     rules: Vec<RawRule>,
     profiles: Vec<ProfileInfo>,
+    /// Profile names from `netsh advfirewall show currentprofile`.
+    netsh_active: Vec<String>,
     host: HostSnapshot,
     tracked_exe: Option<String>,
     tracked_children: Vec<ProcInfo>,
@@ -291,6 +343,7 @@ pub async fn collect(agent: &Agent, port: u16, expect: Option<String>) -> Value 
                 firewall_error: Some("diagnostic task stopped".into()),
                 rules: Vec::new(),
                 profiles: Vec::new(),
+                netsh_active: Vec::new(),
                 host: empty_host(Some("diagnostic task stopped".into())),
                 tracked_exe: None,
                 tracked_children: Vec::new(),
@@ -356,6 +409,7 @@ fn collect_local(port: u16, tracked: Option<u32>) -> LocalRaw {
             firewall_error: Some("Windows Defender Firewall is read only on Windows".into()),
             rules: Vec::new(),
             profiles: Vec::new(),
+            netsh_active: Vec::new(),
             host: HostSnapshot {
                 listening_error: Some(
                     "UDP listeners are read with Get-NetUDPEndpoint on Windows".into(),
@@ -377,58 +431,124 @@ fn collect_local(port: u16, tracked: Option<u32>) -> LocalRaw {
 #[cfg(windows)]
 fn collect_windows(port: u16, tracked: Option<u32>) -> LocalRaw {
     let port_text = port.to_string();
-    let (rules_out, profiles_out, host_out) = std::thread::scope(|scope| {
-        let rules = scope.spawn(|| {
-            run_command(
-                "netsh",
-                &[
-                    "advfirewall",
-                    "firewall",
-                    "show",
-                    "rule",
-                    "name=all",
-                    "verbose",
-                ],
-                None,
-                &[],
+    let (rules_out, profiles_out, current_out, host_out, netstat_out, ipconfig_out) =
+        std::thread::scope(|scope| {
+            let rules = scope.spawn(|| {
+                run_command(
+                    "netsh",
+                    &[
+                        "advfirewall",
+                        "firewall",
+                        "show",
+                        "rule",
+                        "name=all",
+                        "verbose",
+                    ],
+                    None,
+                    &[],
+                )
+            });
+            let profiles = scope
+                .spawn(|| run_command("netsh", &["advfirewall", "show", "allprofiles"], None, &[]));
+            let current = scope.spawn(|| {
+                run_command(
+                    "netsh",
+                    &["advfirewall", "show", "currentprofile"],
+                    None,
+                    &[],
+                )
+            });
+            let host = scope.spawn(|| {
+                run_command(
+                    "powershell.exe",
+                    &[
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        "-",
+                    ],
+                    Some(HOST_SCRIPT.as_bytes()),
+                    &[("UXA_DIAG_PORT", port_text.as_str())],
+                )
+            });
+            let netstat = scope.spawn(|| run_command("netstat", &["-ano", "-p", "UDP"], None, &[]));
+            let ipconfig = scope.spawn(|| run_command("ipconfig", &[], None, &[]));
+            (
+                rules.join(),
+                profiles.join(),
+                current.join(),
+                host.join(),
+                netstat.join(),
+                ipconfig.join(),
             )
         });
-        let profiles = scope
-            .spawn(|| run_command("netsh", &["advfirewall", "show", "allprofiles"], None, &[]));
-        let host = scope.spawn(|| {
-            run_command(
-                "powershell",
-                &["-NoProfile", "-NonInteractive", "-Command", "-"],
-                Some(HOST_SCRIPT.as_bytes()),
-                &[("UXA_DIAG_PORT", port_text.as_str())],
-            )
-        });
-        (rules.join(), profiles.join(), host.join())
-    });
     let (firewall_error, rules, profiles) =
         firewall_from_commands(flatten_join(rules_out), flatten_join(profiles_out));
-    let host = match flatten_join(host_out) {
-        Ok(text) => parse_host_snapshot(&text).unwrap_or_else(|err| HostSnapshot {
-            listening_error: Some(err.clone()),
-            endpoints: Vec::new(),
-            lan_error: Some(err),
-            addresses: Vec::new(),
-            gateways: Vec::new(),
-            profiles: Vec::new(),
-            processes_error: Some("process list was not read".into()),
-            processes: Vec::new(),
-        }),
-        Err(err) => HostSnapshot {
-            listening_error: Some(err.clone()),
-            endpoints: Vec::new(),
-            lan_error: Some(err),
-            addresses: Vec::new(),
-            gateways: Vec::new(),
-            profiles: Vec::new(),
-            processes_error: Some("process list was not read".into()),
-            processes: Vec::new(),
-        },
-    };
+    let current = flatten_join(current_out);
+    let host_cap = flatten_join(host_out);
+    let netstat = flatten_join(netstat_out);
+    let ipconfig = flatten_join(ipconfig_out);
+    let (mut host, netsh_active) = merge_diagnostics(
+        port,
+        host_cap.as_ref().ok().map(|cap| cap.stdout.as_str()),
+        host_cap.as_ref().ok().map(|cap| cap.stderr.as_str()),
+        host_cap.as_ref().err().map(String::as_str),
+        netstat.as_ref().map(|cap| cap.stdout.as_str()).unwrap_or(""),
+        ipconfig
+            .as_ref()
+            .map(|cap| cap.stdout.as_str())
+            .unwrap_or(""),
+        current.as_ref().map(|cap| cap.stdout.as_str()).unwrap_or(""),
+    );
+    if host.endpoints.is_empty() {
+        if let Err(err) = &netstat {
+            host.listening_error = Some(join_detail(host.listening_error.take(), err));
+        }
+    }
+    if host.addresses.is_empty() && host.gateways.is_empty() {
+        if let Err(err) = &ipconfig {
+            host.lan_error = Some(join_detail(host.lan_error.take(), err));
+        }
+    }
+    if host.processes.is_empty() {
+        let again = run_command(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "-",
+            ],
+            Some(PROCESS_SCRIPT.as_bytes()),
+            &[],
+        );
+        match again {
+            Ok(cap) => match parse_host_snapshot(&cap.stdout) {
+                Ok(extra) if !extra.processes.is_empty() => {
+                    host.processes = extra.processes;
+                    host.processes_error = None;
+                }
+                Ok(_) | Err(_) => {
+                    if host.processes_error.is_none() {
+                        host.processes_error = Some(explain_failure(
+                            "process list was not read",
+                            &cap.stdout,
+                            &cap.stderr,
+                        ));
+                    }
+                }
+            },
+            Err(err) => {
+                if host.processes_error.is_none() {
+                    host.processes_error = Some(err);
+                }
+            }
+        }
+    }
     let tracked_exe = tracked.and_then(|pid| {
         host.processes
             .iter()
@@ -443,6 +563,7 @@ fn collect_windows(port: u16, tracked: Option<u32>) -> LocalRaw {
         firewall_error,
         rules,
         profiles,
+        netsh_active,
         host,
         tracked_exe,
         tracked_children,
@@ -450,7 +571,7 @@ fn collect_windows(port: u16, tracked: Option<u32>) -> LocalRaw {
 }
 
 #[cfg(windows)]
-fn flatten_join(joined: std::thread::Result<Result<String, String>>) -> Result<String, String> {
+fn flatten_join(joined: std::thread::Result<Result<Captured, String>>) -> Result<Captured, String> {
     match joined {
         Ok(inner) => inner,
         Err(_) => Err("diagnostic command stopped".into()),
@@ -459,15 +580,15 @@ fn flatten_join(joined: std::thread::Result<Result<String, String>>) -> Result<S
 
 #[cfg(windows)]
 fn firewall_from_commands(
-    rules_out: Result<String, String>,
-    profiles_out: Result<String, String>,
+    rules_out: Result<Captured, String>,
+    profiles_out: Result<Captured, String>,
 ) -> (Option<String>, Vec<RawRule>, Vec<ProfileInfo>) {
     let mut errors = Vec::new();
     let rules = match rules_out {
-        Ok(text) => match parse_netsh_rules(&text) {
+        Ok(cap) => match parse_netsh_rules(&cap.stdout) {
             Ok(rules) => rules,
             Err(err) => {
-                errors.push(err);
+                errors.push(explain_failure(&err, &cap.stdout, &cap.stderr));
                 Vec::new()
             }
         },
@@ -477,10 +598,10 @@ fn firewall_from_commands(
         }
     };
     let profiles = match profiles_out {
-        Ok(text) => match parse_netsh_profiles(&text) {
+        Ok(cap) => match parse_netsh_profiles(&cap.stdout) {
             Ok(profiles) => profiles,
             Err(err) => {
-                errors.push(err);
+                errors.push(explain_failure(&err, &cap.stdout, &cap.stderr));
                 Vec::new()
             }
         },
@@ -520,7 +641,7 @@ fn build_report(
         (None, _) | (_, None) => Value::Null,
         (Some(want), Some(got)) => Value::Bool(want == got),
     };
-    let active = active_profile_names(&local.host.profiles);
+    let active = active_profile_names(&local.host.profiles, &local.netsh_active);
     let mut rules = relevant_rules(&local.rules, port, &exes);
     let truncated = rules.len() > MAX_RULES;
     rules.truncate(MAX_RULES);
@@ -637,9 +758,15 @@ fn build_report(
             Value::Null
         };
     let firewall_error = local.firewall_error.map(|err| redact_secrets_only(&err));
-    let listening_error = match (local.host.listening_error, local.host.processes_error) {
-        (Some(left), Some(right)) => Some(format!("{left}; {right}")),
-        (left, right) => left.or(right),
+    let listening_error = if local.host.endpoints.is_empty() {
+        match (local.host.listening_error, local.host.processes_error) {
+            (Some(left), Some(right)) => Some(format!("{left}; {right}")),
+            (left, right) => left.or(right),
+        }
+    } else if local.host.processes.is_empty() {
+        local.host.processes_error.or(local.host.listening_error)
+    } else {
+        local.host.listening_error
     }
     .map(|err| redact_secrets_only(&err));
     let lan_error = local.host.lan_error.map(|err| redact_secrets_only(&err));
@@ -853,21 +980,27 @@ fn friendly_category(category: &str) -> String {
     }
 }
 
-fn active_profile_names(profiles: &[ConnProfile]) -> Vec<String> {
+fn active_profile_names(profiles: &[ConnProfile], extra: &[String]) -> Vec<String> {
     let mut names = Vec::new();
     for profile in profiles {
-        let name = friendly_category(&profile.category);
-        if name.is_empty() {
-            continue;
-        }
-        if !names
-            .iter()
-            .any(|have: &String| have.eq_ignore_ascii_case(&name))
-        {
-            names.push(name);
-        }
+        push_unique(&mut names, friendly_category(&profile.category));
+    }
+    for name in extra {
+        push_unique(&mut names, friendly_category(name));
     }
     names
+}
+
+fn push_unique(names: &mut Vec<String>, name: String) {
+    if name.is_empty() {
+        return;
+    }
+    if !names
+        .iter()
+        .any(|have: &String| have.eq_ignore_ascii_case(&name))
+    {
+        names.push(name);
+    }
 }
 
 fn children_of(procs: &[ProcInfo], root: u32) -> Vec<ProcInfo> {
@@ -890,6 +1023,223 @@ fn children_of(procs: &[ProcInfo], root: u32) -> Vec<ProcInfo> {
         }
     }
     out
+}
+
+fn merge_diagnostics(
+    port: u16,
+    powershell_stdout: Option<&str>,
+    powershell_stderr: Option<&str>,
+    powershell_failed: Option<&str>,
+    netstat: &str,
+    ipconfig: &str,
+    current_profile: &str,
+) -> (HostSnapshot, Vec<String>) {
+    let stdout = powershell_stdout.unwrap_or("");
+    let stderr = powershell_stderr.unwrap_or("");
+    let mut host = if let Some(err) = powershell_failed {
+        let detail = explain_failure(err, stdout, stderr);
+        blank_host(Some(detail))
+    } else {
+        match parse_host_snapshot(stdout) {
+            Ok(host) => host,
+            Err(err) => blank_host(Some(explain_failure(&err, stdout, stderr))),
+        }
+    };
+    if host.endpoints.is_empty() {
+        let found = parse_netstat_udp(netstat, port);
+        if !found.is_empty() {
+            host.endpoints = found;
+            host.listening_error = None;
+        }
+    }
+    if host.addresses.is_empty() && host.gateways.is_empty() {
+        let (addresses, gateways) = parse_ipconfig(ipconfig);
+        if !addresses.is_empty() || !gateways.is_empty() {
+            host.addresses = addresses;
+            host.gateways = gateways;
+            host.lan_error = None;
+        }
+    }
+    if !host.processes.is_empty() {
+        host.processes_error = None;
+    }
+    let netsh_active = parse_netsh_profiles(current_profile)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>();
+    if host.profiles.is_empty() {
+        for name in &netsh_active {
+            host.profiles.push(ConnProfile {
+                name: name.clone(),
+                adapter: String::new(),
+                category: name.clone(),
+            });
+        }
+    }
+    (host, netsh_active)
+}
+
+fn blank_host(err: Option<String>) -> HostSnapshot {
+    let processes = err.clone();
+    HostSnapshot {
+        listening_error: err.clone(),
+        endpoints: Vec::new(),
+        lan_error: err,
+        addresses: Vec::new(),
+        gateways: Vec::new(),
+        profiles: Vec::new(),
+        processes_error: processes,
+        processes: Vec::new(),
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn join_detail(existing: Option<String>, extra: &str) -> String {
+    match existing {
+        Some(current) if !current.is_empty() => format!("{current}; {extra}"),
+        _ => extra.to_string(),
+    }
+}
+
+fn explain_failure(err: &str, stdout: &str, stderr: &str) -> String {
+    let snippet = streams_snippet(stdout, stderr);
+    if snippet.is_empty() {
+        err.to_string()
+    } else {
+        format!("{err}; {snippet}")
+    }
+}
+
+fn streams_snippet(stdout: &str, stderr: &str) -> String {
+    let mut parts = Vec::new();
+    let out = clip(stdout);
+    let err = clip(stderr);
+    if !out.is_empty() {
+        parts.push(format!("stdout: {out}"));
+    }
+    if !err.is_empty() {
+        parts.push(format!("stderr: {err}"));
+    }
+    parts.join("; ")
+}
+
+fn parse_netstat_udp(text: &str, port: u16) -> Vec<Endpoint> {
+    let mut found = Vec::new();
+    let suffix = format!(":{port}");
+    for line in normalize_command_text(text).lines() {
+        let line = line.trim();
+        if !line.to_ascii_lowercase().starts_with("udp") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let local = parts[1];
+        if !local.ends_with(&suffix) {
+            continue;
+        }
+        let Ok(pid) = parts[parts.len() - 1].parse::<u32>() else {
+            continue;
+        };
+        let address = local[..local.len() - suffix.len()].to_string();
+        if address.is_empty() {
+            continue;
+        }
+        found.push(Endpoint {
+            local_address: address,
+            local_port: port,
+            pid,
+            process_name: String::new(),
+            process_path: String::new(),
+        });
+    }
+    found
+}
+
+fn parse_ipconfig(text: &str) -> (Vec<LanAddr>, Vec<Gateway>) {
+    let mut adapter = String::new();
+    let mut addresses = Vec::new();
+    let mut gateways = Vec::new();
+    let mut want_gateway = false;
+    for line in normalize_command_text(text).lines() {
+        let raw = line.trim_end_matches('\r');
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            want_gateway = false;
+            continue;
+        }
+        let header = !raw.starts_with(' ') && !raw.starts_with('\t');
+        if header && trimmed.to_ascii_lowercase().contains("adapter") && trimmed.ends_with(':') {
+            adapter = trimmed.trim_end_matches(':').trim().to_string();
+            if let Some(idx) = adapter.to_ascii_lowercase().rfind("adapter") {
+                let rest = adapter[idx + "adapter".len()..].trim();
+                if !rest.is_empty() {
+                    adapter = rest.to_string();
+                }
+            }
+            want_gateway = false;
+            continue;
+        }
+        if want_gateway {
+            if let Some(hop) = parse_exact_ipv4(trimmed) {
+                if hop != "0.0.0.0" {
+                    gateways.push(Gateway {
+                        adapter: adapter.clone(),
+                        hop,
+                        metric: 0,
+                    });
+                }
+                continue;
+            }
+            want_gateway = false;
+        }
+        let Some((label, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let label = label.to_ascii_lowercase();
+        let value = value.trim();
+        if label.contains("ipv4") {
+            if let Some(address) = parse_exact_ipv4(value) {
+                if keep_lan_address(&address) {
+                    addresses.push(LanAddr {
+                        adapter: adapter.clone(),
+                        address,
+                        prefix: 0,
+                    });
+                }
+            }
+        } else if label.contains("subnet") {
+            if let Some(last) = addresses.last_mut() {
+                if last.adapter == adapter && last.prefix == 0 {
+                    last.prefix = prefix_of_mask(value);
+                }
+            }
+        } else if label.contains("default gateway") {
+            want_gateway = true;
+            if let Some(hop) = parse_exact_ipv4(value) {
+                if hop != "0.0.0.0" {
+                    gateways.push(Gateway {
+                        adapter: adapter.clone(),
+                        hop,
+                        metric: 0,
+                    });
+                }
+            }
+        }
+    }
+    (addresses, gateways)
+}
+
+fn prefix_of_mask(mask: &str) -> u32 {
+    let Some(mask) = parse_exact_ipv4(mask) else {
+        return 0;
+    };
+    mask.split('.')
+        .filter_map(|part| part.parse::<u8>().ok())
+        .map(|byte| byte.count_ones())
+        .sum()
 }
 
 fn parse_netsh_rules(text: &str) -> Result<Vec<RawRule>, String> {
@@ -1045,7 +1395,8 @@ fn command_refused(text: &str) -> bool {
 }
 
 fn parse_host_snapshot(text: &str) -> Result<HostSnapshot, String> {
-    let json_text = extract_json(text)?;
+    let normalized = normalize_command_text(text);
+    let json_text = extract_json(&normalized)?;
     let value: Value = serde_json::from_str(json_text).map_err(|err| err.to_string())?;
     let obj = value
         .as_object()
@@ -1075,6 +1426,15 @@ fn parse_host_snapshot(text: &str) -> Result<HostSnapshot, String> {
             .filter_map(parse_proc)
             .collect(),
     })
+}
+
+fn normalize_command_text(text: &str) -> String {
+    let text = text.trim_start_matches('\u{feff}');
+    if text.contains('\0') {
+        text.chars().filter(|ch| *ch != '\0').collect()
+    } else {
+        text.to_string()
+    }
 }
 
 fn extract_json(text: &str) -> Result<&str, String> {
@@ -1333,12 +1693,18 @@ struct CmdText {
 }
 
 #[cfg(windows)]
+struct Captured {
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(windows)]
 fn run_command(
     program: &str,
     args: &[&str],
     stdin_bytes: Option<&[u8]>,
     env: &[(&str, &str)],
-) -> Result<String, String> {
+) -> Result<Captured, String> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -1412,17 +1778,18 @@ fn run_command(
     };
     let status = child.wait().map_err(|err| format!("{program}: {err}"))?;
     if !status.success() && stdout_text.trim().is_empty() {
-        let detail = if stderr_text.trim().is_empty() {
+        let detail = streams_snippet(&stdout_text, &stderr_text);
+        let detail = if detail.is_empty() {
             status.to_string()
         } else {
-            clip(&stderr_text)
+            detail
         };
         return Err(format!("{program} failed: {detail}"));
     }
-    if stdout_text.trim().is_empty() && !stderr_text.trim().is_empty() {
-        return Err(clip(&stderr_text));
-    }
-    Ok(stdout_text)
+    Ok(Captured {
+        stdout: stdout_text,
+        stderr: stderr_text,
+    })
 }
 
 #[cfg(windows)]
@@ -1690,6 +2057,7 @@ Firewall Policy                       AllowInbound,AllowOutbound
                 firewall_error: None,
                 rules,
                 profiles,
+                netsh_active: Vec::new(),
                 host,
                 tracked_exe: Some(r"C:\FNF\Server\FridayNightFightsServer.exe".into()),
                 tracked_children: children,
@@ -1737,6 +2105,7 @@ Firewall Policy                       AllowInbound,AllowOutbound
                 firewall_error: Some("token=hide-me failed".into()),
                 rules: Vec::new(),
                 profiles: Vec::new(),
+                netsh_active: Vec::new(),
                 host: empty_host(None),
                 tracked_exe: None,
                 tracked_children: Vec::new(),
@@ -1782,5 +2151,129 @@ Firewall Policy                       AllowInbound,AllowOutbound
         assert!(found.iter().all(|exe| !exe.path.contains("skip-")));
         assert!(found.iter().all(|exe| !exe.path.contains("linked-")));
         assert!(found.iter().all(|exe| !exe.path.contains("Unrelated")));
+    }
+
+    #[test]
+    fn nul_bytes_and_a_preamble_still_parse_the_first_json_object() {
+        let json = r#"{"listeningError":null,"endpoints":[],"lanError":null,"addresses":[],"gateways":[],"profiles":[],"processesError":null,"processes":[]}"#;
+        let nulled: String = json.chars().flat_map(|ch| [ch, '\0']).collect();
+        let host = parse_host_snapshot(&nulled).unwrap();
+        assert!(host.endpoints.is_empty());
+        let wrapped = format!("WARNING: NetTCPIP did not autoload\n{json}");
+        assert!(parse_host_snapshot(&wrapped).is_ok());
+    }
+
+    #[test]
+    fn fallbacks_fill_listeners_lan_and_the_active_profile() {
+        let powershell = "#< CLIXML\n<Objs Version=\"1.1.0.1\"></Objs>\n";
+        let netstat = "\
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:8788           0.0.0.0:0              LISTENING       100
+  UDP    0.0.0.0:7777           *:*                                    4242
+  UDP    [::]:7777              *:*                                    4242
+  UDP    0.0.0.0:53             *:*                                    4
+";
+        let ipconfig = "\
+Ethernet adapter Ethernet:
+
+   IPv4 Address. . . . . . . . . . . : 192.168.1.50
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Default Gateway . . . . . . . . . : 192.168.1.1
+
+Ethernet adapter Loopback Pseudo-Interface 1:
+
+   IPv4 Address. . . . . . . . . . . : 127.0.0.1
+   Subnet Mask . . . . . . . . . . . : 255.0.0.0
+
+Wireless LAN adapter Local Area Connection* 1:
+
+   Autoconfiguration IPv4 Address. . : 169.254.9.9
+   Subnet Mask . . . . . . . . . . . : 255.255.0.0
+";
+        let current = "\
+Private Profile Settings:
+----------------------------------------------------------------------
+State                                 ON
+Firewall Policy                       BlockInbound,AllowOutbound
+";
+        let (host, active) = merge_diagnostics(
+            7777,
+            Some(powershell),
+            Some("token=sekrit module missing"),
+            None,
+            netstat,
+            ipconfig,
+            current,
+        );
+        assert!(host.listening_error.is_none(), "{:?}", host.listening_error);
+        assert_eq!(host.endpoints.len(), 2, "{:?}", host.endpoints);
+        assert_eq!(host.endpoints[0].local_address, "0.0.0.0");
+        assert_eq!(host.endpoints[0].pid, 4242);
+        assert_eq!(host.endpoints[1].local_address, "[::]");
+        assert!(host.lan_error.is_none(), "{:?}", host.lan_error);
+        assert_eq!(host.addresses.len(), 1);
+        assert_eq!(host.addresses[0].address, "192.168.1.50");
+        assert_eq!(host.addresses[0].prefix, 24);
+        assert_eq!(host.addresses[0].adapter, "Ethernet");
+        assert_eq!(host.gateways[0].hop, "192.168.1.1");
+        assert_eq!(active, vec!["Private".to_string()]);
+        let detail = host.processes_error.as_deref().unwrap();
+        assert!(detail.contains("no JSON"), "{detail}");
+        assert!(detail.contains("stdout:"), "{detail}");
+        assert!(detail.contains("stderr:"), "{detail}");
+        assert!(detail.contains("token=sekrit"), "{detail}");
+        let long = "y".repeat(400);
+        let explained = explain_failure("no JSON in command output", &long, "");
+        assert!(explained.contains("..."), "{explained}");
+        assert!(explained.len() < 400, "{explained}");
+
+        let profiles = vec![
+            ProfileInfo {
+                name: "Domain".into(),
+                enabled: true,
+                default_inbound: "Block".into(),
+            },
+            ProfileInfo {
+                name: "Private".into(),
+                enabled: true,
+                default_inbound: "Block".into(),
+            },
+            ProfileInfo {
+                name: "Public".into(),
+                enabled: false,
+                default_inbound: "Block".into(),
+            },
+        ];
+        let report = build_report(
+            7777,
+            None,
+            (None, String::new(), Vec::new()),
+            Vec::new(),
+            Some(4242),
+            LocalRaw {
+                firewall_error: None,
+                rules: Vec::new(),
+                profiles,
+                netsh_active: active,
+                host,
+                tracked_exe: None,
+                tracked_children: Vec::new(),
+            },
+        );
+        let rendered = report.to_string();
+        assert!(rendered.contains("192.168.1.50"), "{rendered}");
+        assert!(rendered.contains("0.0.0.0"), "{rendered}");
+        assert!(!rendered.contains("sekrit"), "{rendered}");
+        assert!(!rendered.contains("127.0.0.1"), "{rendered}");
+        assert!(!rendered.contains("169.254.9.9"), "{rendered}");
+        assert_eq!(report["firewall"]["activeProfiles"][0], "Private");
+        assert_eq!(report["firewall"]["profiles"][1]["active"], true);
+        assert_eq!(report["firewall"]["profiles"][2]["active"], false);
+        assert_eq!(report["listening"]["endpoints"][0]["pid"], 4242);
+        assert_eq!(report["listening"]["endpoints"][0]["isTrackedProcess"], true);
+        assert_eq!(report["lan"]["networkCategory"], "Private");
+        let listening_error = report["listening"]["error"].as_str().unwrap();
+        assert!(listening_error.contains("[redacted]"), "{listening_error}");
+        assert!(!listening_error.contains("sekrit"), "{listening_error}");
     }
 }
