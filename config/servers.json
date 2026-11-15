@@ -3,8 +3,8 @@
     {
       "id": "dolmar",
       "name": "Dolmar's Server",
-      "host": "71.71.45.128",
-      "port": 7777,
+      "host": "scooter-seventeen.tun.ply.gg",
+      "port": 38455,
       "default": true,
       "agentUrl": "https://71.71.45.128:8788"
     },

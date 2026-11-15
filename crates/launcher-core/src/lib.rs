@@ -41,9 +41,9 @@ pub use launch::{
     write_servers_ini, ClientLaunch, PlayPlan, ACCOUNT_PROXY_PATH,
 };
 pub use model::{
-    load_catalog, load_news, load_servers, load_settings, read_manifest, resolve_install_dir,
-    save_settings, write_manifest, Catalog, GameDef, GameSource, GameStatus, InstalledManifest,
-    LauncherInfo, NewsItem, ServerEntry, ServerMap, Settings,
+    load_catalog, load_news, load_servers, load_settings, prefer_shipped_game_host, read_manifest,
+    resolve_install_dir, save_settings, write_manifest, Catalog, GameDef, GameSource, GameStatus,
+    InstalledManifest, LauncherInfo, NewsItem, ServerEntry, ServerMap, Settings,
 };
 pub use patch::{
     asset_matches, atomic_swap, check_zip_magic, copy_preserved, discard_previous,
@@ -68,5 +68,5 @@ pub use sign::{sign_request, verify_request, MAX_SKEW_SECS};
 pub use version::{is_newer, parse_version, GameVersion};
 pub use web::{fetch_web_build, parse_web_build, WebBuild};
 
-pub const USER_AGENT: &str = "uXa-Launcher/0.3.14";
+pub const USER_AGENT: &str = "uXa-Launcher/0.3.15";
 pub const DEFAULT_WEB_VERSION_PATTERN: &str = r"Build\s+(\d+)\s*,\s*last updated\s+([^<\r\n]+)";

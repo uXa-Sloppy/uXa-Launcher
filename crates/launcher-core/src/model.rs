@@ -188,6 +188,43 @@ pub fn load_servers(text: &str) -> Result<ServerMap> {
     Ok(serde_json::from_str(text)?)
 }
 
+/// Direct game address Dolmar's clients used before the playit.gg UDP tunnel.
+pub(crate) const RETIRED_DOLMAR_GAME_HOST: &str = "71.71.45.128";
+
+/// A user `servers.json` replaces the shipped catalog. When Dolmar's game host
+/// in that file is still [`RETIRED_DOLMAR_GAME_HOST`], use the shipped host and
+/// port. `agentUrl`, `accountPort`, and `accountUrl` stay as saved.
+pub fn prefer_shipped_game_host(override_text: &str, bundled_text: &str) -> String {
+    let (Ok(mut user), Ok(bundled)) = (load_servers(override_text), load_servers(bundled_text))
+    else {
+        return override_text.to_string();
+    };
+    let mut changed = false;
+    for (key, entries) in user.iter_mut() {
+        let Some(shipped_list) = bundled.get(key) else {
+            continue;
+        };
+        for entry in entries.iter_mut() {
+            if entry.id != "dolmar" || entry.host.trim() != RETIRED_DOLMAR_GAME_HOST {
+                continue;
+            }
+            let Some(shipped) = shipped_list.iter().find(|server| server.id == entry.id) else {
+                continue;
+            };
+            if entry.host == shipped.host && entry.port == shipped.port {
+                continue;
+            }
+            entry.host = shipped.host.clone();
+            entry.port = shipped.port;
+            changed = true;
+        }
+    }
+    if !changed {
+        return override_text.to_string();
+    }
+    serde_json::to_string(&user).unwrap_or_else(|_| override_text.to_string())
+}
+
 pub fn load_news(text: &str) -> Result<Vec<NewsItem>> {
     let file: NewsFile = serde_json::from_str(text)?;
     Ok(file.items)
@@ -264,8 +301,8 @@ mod tests {
         assert_eq!(catalog.launcher.update_repo, "uXa-Launcher");
         let servers = load_servers(include_str!("../../../config/servers.json")).unwrap();
         let list = servers.get("friday-night-fights").unwrap();
-        assert_eq!(list[0].host, "71.71.45.128");
-        assert_eq!(list[0].port, 7777);
+        assert_eq!(list[0].host, "scooter-seventeen.tun.ply.gg");
+        assert_eq!(list[0].port, 38455);
         assert_eq!(list[0].agent_url, "https://71.71.45.128:8788");
         assert!(list[1].agent_url.is_empty());
         let news = load_news(include_str!("../../../config/news.json")).unwrap();
@@ -285,5 +322,60 @@ mod tests {
             .insert(game.id.clone(), r"E:\FNF".into());
         let path = resolve_install_dir(&settings, Path::new("/default"), game).unwrap();
         assert_eq!(path, PathBuf::from(r"E:\FNF"));
+    }
+
+    #[test]
+    fn old_dolmar_override_takes_the_shipped_game_host() {
+        let bundled = include_str!("../../../config/servers.json");
+        let override_text = r#"{
+          "friday-night-fights": [
+            {
+              "id": "dolmar",
+              "name": "Dolmar's Server",
+              "host": "71.71.45.128",
+              "port": 7777,
+              "default": true,
+              "agentUrl": "https://seats.trycloudflare.com",
+              "accountPort": 7901,
+              "accountUrl": "http://accounts.example:7901"
+            },
+            {
+              "id": "localhost",
+              "name": "Localhost",
+              "host": "71.71.45.128",
+              "port": 7777
+            }
+          ]
+        }"#;
+        let merged = load_servers(&prefer_shipped_game_host(override_text, bundled)).unwrap();
+        let list = &merged["friday-night-fights"];
+        assert_eq!(list[0].host, "scooter-seventeen.tun.ply.gg");
+        assert_eq!(list[0].port, 38455);
+        assert_eq!(list[0].agent_url, "https://seats.trycloudflare.com");
+        assert_eq!(list[0].account_port, Some(7901));
+        assert_eq!(list[0].account_url, "http://accounts.example:7901");
+        assert_eq!(list[1].host, "71.71.45.128");
+        assert_eq!(list[1].port, 7777);
+
+        let custom = r#"{"friday-night-fights":[{"id":"dolmar","name":"D","host":"other.example","port":1,"agentUrl":"https://keep.example"}]}"#;
+        let kept = load_servers(&prefer_shipped_game_host(custom, bundled)).unwrap();
+        assert_eq!(kept["friday-night-fights"][0].host, "other.example");
+        assert_eq!(kept["friday-night-fights"][0].port, 1);
+        assert_eq!(
+            kept["friday-night-fights"][0].agent_url,
+            "https://keep.example"
+        );
+        assert_eq!(prefer_shipped_game_host("not json", bundled), "not json");
+
+        let shipped = load_servers(&prefer_shipped_game_host(bundled, bundled)).unwrap();
+        assert_eq!(
+            shipped["friday-night-fights"][0].host,
+            "scooter-seventeen.tun.ply.gg"
+        );
+        assert_eq!(shipped["friday-night-fights"][0].port, 38455);
+        assert_eq!(
+            shipped["friday-night-fights"][0].agent_url,
+            "https://71.71.45.128:8788"
+        );
     }
 }

@@ -17,7 +17,7 @@ Desktop launcher for the uXa gaming guild, version **0.3.1**. It installs and pa
 - **Patching** compares the local manifest with the release tag. The download shows progress, can resume, and is checked (size, zip structure, and the GitHub `sha256` digest when the API sends one). The zip is extracted beside the install and swapped into place. If the swap fails, the previous install is put back.
 - **Saves and config** listed in `preserve` (by default `Saved/SaveGames` and `Saved/Config`) are copied onto the new build before the swap.
 - **Play** is disabled while the launcher is checking or patching. It is **Install** or **Update** when a build is needed, and green **Play** when the install matches the release. If GitHub cannot be reached but a copy is already installed, Play stays available.
-- **Server.** `config/servers.json` lists servers. Dolmar's Server (`71.71.45.128:7777`) is the default, plus Localhost. Play launches `FridayNightFights.exe` with `host:port` as the first argument and writes `Config/Servers.ini` as `Name | Host | Port` lines. A small dot is a best-effort TCP probe; the game itself uses UDP, so "unknown" does not mean the server is down.
+- **Server.** `config/servers.json` lists servers. Dolmar's Server (`scooter-seventeen.tun.ply.gg:38455`, a playit.gg UDP tunnel to the game port) is the default, plus Localhost. Play launches `FridayNightFights.exe` with `host:port` as the first argument and writes `Config/Servers.ini` as `Name | Host | Port` lines. A small dot is a best-effort TCP probe; the game itself uses UDP, so "unknown" does not mean the server is down.
 - **Grave March** opens `https://www.undeadlegion.pro/grave-march-unity/` in the default browser. The version line is read from that page (`Build 72, last updated Oct 13, 2026`). If the page cannot be read, Play still works.
 - **Patch notes** render the GitHub release body (or Grave March's build line). **Guild news** loads a `news.json` URL from Settings, and falls back to the bundled feed.
 - **Settings** cover the games folder, a per-game install path, an optional GitHub token, update checks on startup, the news URL, and the launcher's own update repository. On Windows the token is stored in Credential Manager; otherwise it is a user-only file. It is never written into `settings.json`.
@@ -61,7 +61,7 @@ Every command also writes `%LOCALAPPDATA%\uXa Launcher\cli-last.json`. `UXA_CLI_
 - `--deploy-server <version>` deploys that server release tag to the selected server (Dolmar's Server unless Settings names another) through the uXa Server Agent. It waits until the agent finishes, then prints the agent's result and the running version.
 - With no flags, the launcher window opens.
 
-The server list is `config/servers.json`, or `%LOCALAPPDATA%\uXa\Launcher\servers.json` when that file is present (the same override the window uses, including a Cloudflare tunnel `agentUrl`). Deploy and status use the admin key already saved by unlocking admin in the window. They never print, log, or rewrite that key, a GitHub token, or `settings.json`. If the key is not saved yet, the command stops and asks you to unlock admin once in the window.
+The server list is `config/servers.json`, or `%LOCALAPPDATA%\uXa\Launcher\servers.json` when that file is present (the same override the window uses, including a Cloudflare tunnel `agentUrl`). A saved Dolmar game host of `71.71.45.128` is read as the shipped tunnel host and port; `agentUrl` and `accountPort` in that file stay as saved. Deploy and status use the admin key already saved by unlocking admin in the window. They never print, log, or rewrite that key, a GitHub token, or `settings.json`. If the key is not saved yet, the command stops and asks you to unlock admin once in the window.
 
 Installing 0.3.1 over an older copy, or letting the launcher replace its own exe, updates `%LOCALAPPDATA%\uXa Launcher\uxa-launcher.exe` only. Settings, `servers.json`, the admin key, and the GitHub token stay in `%LOCALAPPDATA%\uXa\Launcher`.
 
@@ -167,7 +167,7 @@ Unlock with `dev-admin-key`. Deploy & Restart. The agent log should show the dow
 | Launcher data | `%LOCALAPPDATA%\uXa\Launcher` | `~/.local/share/uXa/Launcher` |
 | Games | `%LOCALAPPDATA%\uXa\Games\FridayNightFights` | `~/.local/share/uXa/Games/FridayNightFights` |
 
-Override either location with `UXA_DATA_DIR` and `UXA_INSTALL_ROOT`. A `games.json`, `servers.json`, or `news.json` placed in the launcher data directory replaces the copy shipped with the app.
+Override either location with `UXA_DATA_DIR` and `UXA_INSTALL_ROOT`. A `games.json`, `servers.json`, or `news.json` placed in the launcher data directory replaces the copy shipped with the app. Dolmar's game host in that `servers.json` is still the shipped tunnel host when the saved host is `71.71.45.128`.
 
 Private releases: add a GitHub token with access to read release contents. Public releases need no token. `UXA_GITHUB_API_BASE` points the client at another host (used by the mock server below).
 

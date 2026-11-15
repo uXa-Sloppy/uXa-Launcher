@@ -341,8 +341,10 @@ do not open a window. They still run when the window is already open.
     the server's invite_keys.txt, and print the key on stdout.
 
 The server list is the bundled config, or %LOCALAPPDATA%\\uXa\\Launcher\\servers.json
-when that file is present. Deploy and status use the saved admin key. Unlock
-admin once in the launcher window if the key is not saved yet.
+when that file is present. A saved Dolmar game host of 71.71.45.128 is read as
+the shipped tunnel host and port. agentUrl and accountPort stay as saved.
+Deploy and status use the saved admin key. Unlock admin once in the launcher
+window if the key is not saved yet.
 
 Every command also writes %LOCALAPPDATA%\\uXa Launcher\\cli-last.json with
 command, ok, message, versions, timestamp, and exitCode. Success exits 0.

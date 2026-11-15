@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use launcher_core::{
     agent_exchange, cleanup_previous_launcher, command_label, download_launcher_update,
     execute_cli, failure_cli_result, http_client, inspect_game as inspect_release, load_catalog,
-    load_news, load_servers, load_settings, patch_game, prepare_client_launch, probe_tcp,
+    load_news, load_servers, load_settings, patch_game, prefer_shipped_game_host,
+    prepare_client_launch, probe_tcp,
     read_manifest, redact_cli, replace_executable, resolve_install_dir, resolve_update_repo,
     restore_previous_launcher, running_from_cargo_target, save_settings as write_settings,
     spawn_process, try_local_cli, verify_exe_file, write_cli_result, write_manifest, AgentAction,
@@ -173,8 +174,12 @@ fn init_logging(log_dir: &Path, console: bool) {
 fn read_override(dir: &Path, name: &str, bundled: &str) -> Result<String, String> {
     let path = dir.join(name);
     if path.is_file() {
-        return fs::read_to_string(&path)
-            .map_err(|err| format!("Could not read {}: {err}", path.display()));
+        let text = fs::read_to_string(&path)
+            .map_err(|err| format!("Could not read {}: {err}", path.display()))?;
+        if name == "servers.json" {
+            return Ok(prefer_shipped_game_host(&text, bundled));
+        }
+        return Ok(text);
     }
     Ok(bundled.to_string())
 }

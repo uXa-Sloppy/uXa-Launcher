@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::model::RETIRED_DOLMAR_GAME_HOST;
 use crate::{Error, Result, ServerEntry};
 
 pub enum PlayPlan {
@@ -188,6 +189,8 @@ pub const ACCOUNT_PROXY_PATH: &str = "/fnf-accounts";
 /// `host:port` and build `http://host:port/v1/signup`, so a URL with a path is passed as
 /// `host:port/path:port`; the client then requests `http://host:port/path:port/v1/signup`,
 /// which the agent accepts. Falls back to the legacy `host:accountPort|7798`.
+/// When `agentUrl` still names the retired direct machine and the game host is a
+/// different address (the playit UDP tunnel), sign-ups stay on that machine.
 pub fn account_server_arg(server: &ServerEntry) -> String {
     let from_url = if !server.account_url.trim().is_empty() {
         account_spec_from_url(server.account_url.trim())
@@ -198,10 +201,38 @@ pub fn account_server_arg(server: &ServerEntry) -> String {
         Some(spec) => format!("-FNFAccountServer={spec}"),
         None => format!(
             "-FNFAccountServer={}:{}",
-            server.host.trim(),
+            account_fallback_host(server),
             server.account_port.filter(|p| *p != 0).unwrap_or(7798)
         ),
     }
+}
+
+fn agent_authority_host(agent_url: &str) -> Option<&str> {
+    let url = agent_url.trim().trim_end_matches('/');
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return None;
+    }
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+fn account_fallback_host(server: &ServerEntry) -> &str {
+    let game = server.host.trim();
+    if let Some(agent) = agent_authority_host(&server.agent_url) {
+        if game != agent && agent == RETIRED_DOLMAR_GAME_HOST {
+            return agent;
+        }
+    }
+    game
 }
 
 /// Public sign-up base URL behind an agent URL, when a game client can reach it over plain
@@ -348,5 +379,21 @@ mod account_arg_tests {
         assert_eq!(account_spec_from_url("ftp://h/x"), None);
         assert_eq!(account_spec_from_url("http://h/a b"), None);
         assert_eq!(agent_account_url("https://h:443"), Some("http://h/fnf-accounts".into()));
+    }
+
+    #[test]
+    fn tunnel_host_and_port_are_the_connect_argument() {
+        let mut server = entry("https://71.71.45.128:8788", "", None);
+        server.host = "scooter-seventeen.tun.ply.gg".into();
+        server.port = 38455;
+        validate_server(&server).unwrap();
+        assert_eq!(format_address(&server), "scooter-seventeen.tun.ply.gg:38455");
+        assert_eq!(account_server_arg(&server), "-FNFAccountServer=71.71.45.128:7798");
+        server.account_port = Some(7900);
+        assert_eq!(account_server_arg(&server), "-FNFAccountServer=71.71.45.128:7900");
+
+        let mut other = entry("https://10.1.2.3:8788", "", Some(7900));
+        other.host = "other.example".into();
+        assert_eq!(account_server_arg(&other), "-FNFAccountServer=other.example:7900");
     }
 }
